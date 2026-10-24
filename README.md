@@ -1,6 +1,6 @@
 # HCM Lite API
 
-Node.js 24.19, Express 5, MongoDB 8 replica set and Mongoose. The paired UI is `rameezik/hcm-app` at `/workspace/hcm-app` (Next.js16 / React19 / Tailwind4 / JavaScript + JSX).
+Node.js 24.19, Express 5, MongoDB 8 replica set and Mongoose. The paired UI is `rameezik/HCM-frontend` at `/workspace/HCM-frontend` (Next.js16 / React19 / Tailwind4 / JavaScript + JSX).
 
 ## Run in this cloud environment
 
