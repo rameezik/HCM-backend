@@ -24,6 +24,13 @@ const User = model("User", {
   tokenVersion: { type: Number, default: 0 },
   employee: ref("Employee", false),
 });
+const PasswordResetToken = model("PasswordResetToken", {
+  user: { ...ref("User"), unique: true },
+  tokenHash: { type: String, required: true, unique: true, select: false },
+  userTokenVersion: { type: Number, required: true },
+  deliveredAt: Date,
+  expiresAt: { type: Date, required: true, expires: 0 },
+});
 const Company = model("Company", {
   singleton: { type: String, default: "company", unique: true },
   name: { type: String, required: true },
@@ -249,6 +256,7 @@ const BiometricChallenge = model(
   ],
 );
 module.exports = {
+  PasswordResetToken,
   BiometricEnrollment,
   BiometricChallenge,
   User,

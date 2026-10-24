@@ -46,6 +46,8 @@ app.use((req, res) =>
 );
 app.use((error, req, res, next) => {
   if (res.headersSent) return next(error);
+  if (error.type === 'entity.parse.failed')
+    return res.status(400).json({ message: 'Request body must contain valid JSON.' });
   if (error instanceof ZodError)
     return res
       .status(422)
@@ -82,7 +84,7 @@ app.use((error, req, res, next) => {
       message:
         status === 500 ? "An unexpected server error occurred." : error.message,
       ...(error.details ? { details: error.details } : {}),
-      ...(typeof error.code === "string" && error.code.startsWith("AI_") ? {code:error.code} : {}),
+      ...(typeof error.code === "string" && /^(?:AI_|AUTH_|BIOMETRIC_)/.test(error.code) ? {code:error.code} : {}),
     });
 });
 module.exports = app;

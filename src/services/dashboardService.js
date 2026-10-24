@@ -1,19 +1,39 @@
 const M = require("../models");
+const mongoose = require("mongoose");
+const ApiError = require("../utils/ApiError");
 const { board } = require("./attendanceService");
+const { businessDate } = require("./attendanceWriter");
 const { balances } = require("./leaveService");
 const { employeeScope, range, settings } = require("./context");
-const { round, today } = require("./rules");
-async function dashboard(user, query = {}) {
-  const { start, end } = range(query);
+const { round } = require("./rules");
+async function dashboard(user, query = {}, options = {}) {
+  const { company } = await settings();
+  const now = options.now ? new Date(options.now) : new Date();
+  const asOf = businessDate(now, company);
+  const { start, end } = range({ ...query, end: query.end || asOf });
   const filter = { ...employeeScope(user), joinDate: { $lte: end } };
-  if (query.department) filter.department = query.department;
+  const departmentFilter = {};
+  if (query.department) {
+    if (!mongoose.isValidObjectId(query.department))
+      throw new ApiError(422, "Department must be a valid record ID.");
+    // Mongoose casts find() filters, but never casts aggregation $match values.
+    departmentFilter.department = new mongoose.Types.ObjectId(
+      String(query.department),
+    );
+    Object.assign(filter, departmentFilter);
+  }
   const selected = await M.Employee.find(filter).select("_id").lean();
   const ids = selected.map((e) => e._id);
-  const records = await board(user, {
-    start,
-    end,
-    department: query.department,
-  });
+  const records = await board(
+    user,
+    {
+      start,
+      end,
+      department: query.department,
+    },
+    undefined,
+    { now },
+  );
   const count = (status) => records.filter((r) => r.status === status).length;
   const onLeave = count("on_leave"),
     absent = count("absent"),
@@ -24,17 +44,18 @@ async function dashboard(user, query = {}) {
     count("late") +
     count("missing_checkout") +
     0.5 * count("half_day");
+  const snapshotFilter = {
+    ...filter,
+    $or: [
+      { exitDate: { $exists: false } },
+      { exitDate: "" },
+      { exitDate: null },
+      { exitDate: { $gt: end } },
+    ],
+  };
   const [headcount] = await M.Employee.aggregate([
     {
-      $match: {
-        ...filter,
-        $or: [
-          { exitDate: { $exists: false } },
-          { exitDate: "" },
-          { exitDate: null },
-          { exitDate: { $gt: end } },
-        ],
-      },
+      $match: snapshotFilter,
     },
     {
       $group: {
@@ -45,7 +66,7 @@ async function dashboard(user, query = {}) {
     },
   ]);
   const byDepartment = await M.Employee.aggregate([
-    { $match: { _id: { $in: ids }, status: { $ne: "exited" } } },
+    { $match: snapshotFilter },
     {
       $group: {
         _id: "$department",
@@ -58,6 +79,7 @@ async function dashboard(user, query = {}) {
         from: "departments",
         localField: "_id",
         foreignField: "_id",
+        pipeline: [{ $match: { company: company._id } }],
         as: "department",
       },
     },
@@ -70,7 +92,7 @@ async function dashboard(user, query = {}) {
     },
   ]);
   const byDesignation = await M.Employee.aggregate([
-    { $match: { _id: { $in: ids } } },
+    { $match: snapshotFilter },
     {
       $group: {
         _id: "$designation",
@@ -83,6 +105,7 @@ async function dashboard(user, query = {}) {
         from: "designations",
         localField: "_id",
         foreignField: "_id",
+        pipeline: [{ $match: { company: company._id } }],
         as: "designation",
       },
     },
@@ -95,11 +118,11 @@ async function dashboard(user, query = {}) {
     },
   ]);
   const gender = await M.Employee.aggregate([
-    { $match: { _id: { $in: ids } } },
+    { $match: snapshotFilter },
     { $group: { _id: "$gender", count: { $sum: 1 } } },
   ]);
   const tenure = await M.Employee.aggregate([
-    { $match: { _id: { $in: ids } } },
+    { $match: snapshotFilter },
     {
       $project: {
         years: {
@@ -221,7 +244,7 @@ async function dashboard(user, query = {}) {
   }
   const startCount = await M.Employee.countDocuments({
     ...employeeScope(user),
-    ...(query.department ? { department: query.department } : {}),
+    ...departmentFilter,
     joinDate: { $lte: start },
     $or: [
       { exitDate: { $exists: false } },
@@ -237,7 +260,7 @@ async function dashboard(user, query = {}) {
   const yearStart = `${end.slice(0, 4)}-01-01`;
   const ytdFilter = {
     ...employeeScope(user),
-    ...(query.department ? { department: query.department } : {}),
+    ...departmentFilter,
   };
   const ytdStartCount = await M.Employee.countDocuments({
     ...ytdFilter,
@@ -270,11 +293,16 @@ async function dashboard(user, query = {}) {
           employee: { $in: ids },
           status: "pending",
         }));
-  const todayRows = await board(user, {
-    start: today(),
-    end: today(),
-    department: query.department,
-  });
+  const todayRows = await board(
+    user,
+    {
+      start: asOf,
+      end: asOf,
+      department: query.department,
+    },
+    undefined,
+    { now },
+  );
   const result = {
     filters: { start, end, department: query.department || null },
     attritionYTD,
@@ -287,7 +315,7 @@ async function dashboard(user, query = {}) {
     attendanceRate: denominator ? round((weighted / denominator) * 100) : 0,
     latePercent:
       count("present") + count("late")
-        ? round((count("late") / (count("present") + count("late"))) * 100)
+        ? round((100 * count("late")) / (count("present") + count("late")))
         : 0,
     absenteeism: records.length ? round((absent / records.length) * 100) : 0,
     absent,
@@ -321,7 +349,7 @@ async function dashboard(user, query = {}) {
   };
   if (user.employee) {
     result.leaveBalance = await balances(user);
-    const weekStart = new Date();
+    const weekStart = new Date(`${asOf}T00:00:00.000Z`);
     weekStart.setUTCDate(
       weekStart.getUTCDate() - ((weekStart.getUTCDay() + 6) % 7),
     );
@@ -329,7 +357,7 @@ async function dashboard(user, query = {}) {
       {
         $match: {
           employee: user.employee,
-          date: { $gte: weekStart.toISOString().slice(0, 10), $lte: today() },
+          date: { $gte: weekStart.toISOString().slice(0, 10), $lte: asOf },
         },
       },
       { $group: { _id: null, hours: { $sum: "$hours" } } },

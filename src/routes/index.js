@@ -185,6 +185,7 @@ router.post(
     signIn(res, user);
   }),
 );
+router.use("/auth", require("./publicAuthRoutes")({ companySchema, signIn }));
 router.use(auth);
 router.get("/auth/me", (req, res) => res.json(userView(req.user)));
 router.post(
@@ -722,18 +723,24 @@ router.patch(
           { $set: { status: "deleting", deleteRequestedAt: new Date() } },
           { session },
         );
-      if (req.user.role === "hr")
+      if (req.user.role === "hr") {
+        const login = requireDoc(
+          await M.User.findById(employee.user).select("email").session(session),
+        );
+        // Session versions also bind reset links sent to the former mailbox.
+        const revokeSessions =
+          employee.status === "exited" || login.email !== employee.email;
         await M.User.updateOne(
           { _id: employee.user },
           {
             name: employee.name,
             email: employee.email,
-            ...(employee.status === "exited"
-              ? { active: false, $inc: { tokenVersion: 1 } }
-              : {}),
+            ...(employee.status === "exited" ? { active: false } : {}),
+            ...(revokeSessions ? { $inc: { tokenVersion: 1 } } : {}),
           },
           { session },
         );
+      }
       await C.audit(session, req.user, "update", "Employee", before, employee);
       return employee;
     });
