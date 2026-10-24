@@ -1,14 +1,16 @@
-require("dotenv").config({ quiet: true });
+const { loadEnvironment } = require("./src/config/environment");
 async function start() {
-  if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32)
-    throw new Error("JWT_SECRET must contain at least 32 random characters.");
+  loadEnvironment();
   await require("./src/config/db")();
   const app = require("./src/app");
+  const stopRetention =
+    require("./src/services/biometricRetention").startBiometricRetention();
   const server = app.listen(Number(process.env.PORT || 4000), "0.0.0.0", () =>
     console.log(`HCM API listening on port ${process.env.PORT || 4000}`),
   );
   const stop = () =>
     server.close(async () => {
+      stopRetention();
       await require("mongoose").disconnect();
       process.exit(0);
     });

@@ -14,6 +14,7 @@ const { board } = require("../services/attendanceService");
 const { balances } = require("../services/leaveService");
 const { generate } = require("../services/payrollService");
 const { dashboard } = require("../services/dashboardService");
+const { withCompany } = require("../services/companyContext");
 const router = express.Router();
 const wrap = (fn) => (req, res, next) =>
   Promise.resolve(fn(req, res)).catch(next);
@@ -38,6 +39,7 @@ const userView = (user) => ({
   email: user.email,
   role: user.role,
   employee: user.employee,
+  company: user.company,
   active: user.active,
   mustChangePassword: user.mustChangePassword,
 });
@@ -50,7 +52,11 @@ const cookieOptions = () => ({
 });
 function signIn(res, user) {
   const token = jwt.sign(
-    { sub: String(user._id), version: user.tokenVersion },
+    {
+      sub: String(user._id),
+      version: user.tokenVersion,
+      company: user.company ? String(user.company) : undefined,
+    },
     process.env.JWT_SECRET,
     { algorithm: "HS256", expiresIn: "8h" },
   );
@@ -69,13 +75,29 @@ const companySchema = z
       .string()
       .regex(/^([01]\d|2[0-3]):[0-5]\d$/)
       .default("09:00"),
+    officeEnd: z
+      .string()
+      .regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+      .default("17:00"),
+    maxShiftHours: z.number().min(1).max(24).default(20),
+    biometricRetentionDays: z.number().int().min(1).max(365).default(365),
     graceMinutes: z.number().int().min(0).max(180).default(15),
     halfDayHours: z.number().min(1).max(12).default(5),
     weekend: z.array(z.number().int().min(0).max(6)).max(6).default([0, 6]),
     latitude: z.number().min(-90).max(90).optional(),
     longitude: z.number().min(-180).max(180).optional(),
     radius: z.number().positive().max(10000).default(150),
-    timezone: z.literal("UTC").default("UTC"),
+    timezone: z
+      .string()
+      .refine((value) => {
+        try {
+          new Intl.DateTimeFormat("en", { timeZone: value });
+          return true;
+        } catch {
+          return false;
+        }
+      }, "Choose a valid IANA timezone")
+      .default("UTC"),
   })
   .strict();
 router.get(
@@ -105,28 +127,30 @@ router.post(
       if (await M.Company.exists({}).session(session))
         throw new E(409, "Company is already initialized.");
       const [company] = await M.Company.create([body.company], { session });
-      const [admin] = await M.User.create(
-        [
-          {
-            name: body.name,
-            email: body.email,
-            passwordHash: await bcrypt.hash(body.password, 12),
-            role: "admin",
-            mustChangePassword: false,
-          },
-        ],
-        { session },
-      );
-      await M.LeaveType.create(
-        [
-          { name: "Annual", quota: 14 },
-          { name: "Sick", quota: 8 },
-          { name: "Casual", quota: 10 },
-          { name: "Unpaid", quota: 0, unpaid: true },
-        ],
-        { session, ordered: true },
-      );
-      await C.audit(session, admin, "setup", "Company", null, company);
+      await withCompany(company._id, async () => {
+        const [admin] = await M.User.create(
+          [
+            {
+              name: body.name,
+              email: body.email,
+              passwordHash: await bcrypt.hash(body.password, 12),
+              role: "admin",
+              mustChangePassword: false,
+            },
+          ],
+          { session },
+        );
+        await M.LeaveType.create(
+          [
+            { name: "Annual", quota: 14 },
+            { name: "Sick", quota: 8 },
+            { name: "Casual", quota: 10 },
+            { name: "Unpaid", quota: 0, unpaid: true },
+          ],
+          { session, ordered: true },
+        );
+        await C.audit(session, admin, "setup", "Company", null, company);
+      });
     });
     res.status(201).json({ message: "Company initialized. Sign in as Admin." });
   }),
@@ -151,6 +175,13 @@ router.post(
     await C.transaction((session) =>
       C.audit(session, user, "login", "User", null, userView(user)),
     );
+    if (!user.company) {
+      const companies = await M.Company.find().limit(2).select("_id").lean();
+      if (companies.length !== 1)
+        throw new E(403, "This account requires a company assignment.");
+      user.company = companies[0]._id;
+      await user.save();
+    }
     signIn(res, user);
   }),
 );
@@ -403,6 +434,12 @@ router.patch(
       }
       user.tokenVersion++;
       await user.save({ session });
+      if (body.active === false && user.employee)
+        await M.BiometricEnrollment.updateOne(
+          { employee: user.employee },
+          { $set: { status: "deleting", deleteRequestedAt: new Date() } },
+          { session },
+        );
       await C.audit(
         session,
         req.user,
@@ -679,6 +716,12 @@ router.patch(
       if (req.user.role === "hr") await employeeReferences(body, session);
       Object.assign(employee, body);
       await employee.save({ session });
+      if (employee.status === "exited")
+        await M.BiometricEnrollment.updateOne(
+          { employee: employee._id },
+          { $set: { status: "deleting", deleteRequestedAt: new Date() } },
+          { session },
+        );
       if (req.user.role === "hr")
         await M.User.updateOne(
           { _id: employee.user },
@@ -701,89 +744,33 @@ router.get(
   "/attendance",
   wrap(async (req, res) => res.json(await board(req.user, req.query))),
 );
+const { writeAttendance } = require("../services/attendanceWriter");
+router.get(
+  "/attendance/analytics",
+  wrap(async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    res.json(
+      await require("../services/attendanceAnalyticsService").analytics(
+        req.user,
+        req.query,
+      ),
+    );
+  }),
+);
 for (const action of ["check-in", "check-out"])
   router.post(
     `/attendance/${action}`,
     roles("hr", "employee"),
     wrap(async (req, res) => {
-      const employee = C.requireEmployee(req.user),
-        now = new Date(),
-        day = R.today();
-      const record = await C.transaction(async (session) => {
-        const person = requireDoc(
-          await M.Employee.findByIdAndUpdate(
-            employee,
-            { $inc: { __v: 1 } },
-            { returnDocument: "after", session },
-          ),
-        );
-        if (
-          await M.Payroll.exists({
-            month: day.slice(0, 7),
-            status: "finalized",
-          }).session(session)
-        )
-          throw new E(409, "Payroll for this month is finalized.");
-        if (person.joinDate > day || (person.exitDate && person.exitDate < day))
-          throw new E(422, "Your employment is not active today.");
-        const { company, holidays } = await C.settings(session);
-        if (!R.workingDays(day, day, company, holidays).length)
-          throw new E(422, "Today is not a working day.");
-        const existing = await M.Attendance.findOne({
-          employee,
-          date: day,
-        }).session(session);
-        if (action === "check-in") {
-          if (existing) throw new E(409, "Already checked in today.");
-          if (
-            await M.Leave.exists({
-              employee,
-              status: "approved",
-              days: day,
-            }).session(session)
-          )
-            throw new E(422, "Cancel approved leave before checking in.");
-          const [after] = await M.Attendance.create(
-            [
-              {
-                employee,
-                date: day,
-                checkIn: now,
-                rules: company,
-                ...R.attendanceStatus(now, null, company),
-              },
-            ],
-            { session },
-          );
-          await C.audit(
-            session,
-            req.user,
-            "check_in",
-            "Attendance",
-            null,
-            after,
-          );
-          return after;
-        }
-        if (!existing) throw new E(422, "Check in first.");
-        if (existing.checkOut) throw new E(409, "Already checked out today.");
-        const before = existing.toObject();
-        existing.checkOut = now;
-        Object.assign(
-          existing,
-          R.attendanceStatus(existing.checkIn, now, existing.rules),
-        );
-        await existing.save({ session });
-        await C.audit(
+      z.object({})
+        .strict()
+        .parse(req.body || {});
+      const record = await C.transaction((session) =>
+        writeAttendance(req.user, action, {
           session,
-          req.user,
-          "check_out",
-          "Attendance",
-          before,
-          existing,
-        );
-        return existing;
-      });
+          verification: { method: "web" },
+        }),
+      );
       res.json(record);
     }),
   );
@@ -812,19 +799,23 @@ router.post(
       })
       .strict()
       .parse(req.body);
-    if (
-      body.date > R.today() ||
-      !body.checkIn.startsWith(body.date) ||
-      !body.checkOut.startsWith(body.date)
-    )
-      throw new E(
-        422,
-        "Correction times must belong to a past or current date.",
-      );
     const employee = C.requireEmployee(req.user);
     const doc = await C.transaction(async (session) => {
       const { company, holidays } = await C.settings(session);
-      R.attendanceStatus(body.checkIn, body.checkOut, company);
+      const clock = require("../services/attendanceWriter");
+      if (
+        body.date > clock.businessDate(new Date(), company) ||
+        clock.businessDate(new Date(body.checkIn), company) !== body.date ||
+        Date.parse(body.checkOut) > Date.now()
+      )
+        throw new E(
+          422,
+          "Correction times must belong to a completed company shift and cannot be in the future.",
+        );
+      R.attendanceStatus(body.checkIn, body.checkOut, {
+        ...company,
+        businessDate: body.date,
+      });
       const person = requireDoc(
         await M.Employee.findById(employee).session(session),
       );
@@ -909,6 +900,7 @@ router.patch(
             checkIn: correction.checkIn,
             checkOut: correction.checkOut,
             rules,
+            verificationMethod: "hr-correction",
             ...R.attendanceStatus(
               correction.checkIn,
               correction.checkOut,
@@ -1351,4 +1343,5 @@ router.get(
   ),
 );
 router.use("/ai", require("./aiRoutes"));
+router.use("/biometrics", require("./biometricRoutes")({ writeAttendance }));
 module.exports = router;

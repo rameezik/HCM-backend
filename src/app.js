@@ -6,6 +6,8 @@ const { rateLimit } = require("express-rate-limit");
 const { ZodError } = require("zod");
 const app = express();
 app.disable("x-powered-by");
+// Trust only explicitly known reverse proxies when deriving HTTPS for face capture.
+app.set("trust proxy", process.env.TRUST_PROXY || "loopback");
 app.use(helmet());
 const origins = (
   process.env.FRONTEND_URL || "http://localhost:3000,http://127.0.0.1:3000"
@@ -80,6 +82,7 @@ app.use((error, req, res, next) => {
       message:
         status === 500 ? "An unexpected server error occurred." : error.message,
       ...(error.details ? { details: error.details } : {}),
+      ...(typeof error.code === "string" && error.code.startsWith("AI_") ? {code:error.code} : {}),
     });
 });
 module.exports = app;

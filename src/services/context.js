@@ -11,13 +11,18 @@ async function audit(session, actor, action, entity, before, after) {
       ? null
       : JSON.parse(
           JSON.stringify(value, (k, v) =>
-            /password|tokenVersion/i.test(k) ? undefined : v,
+            /password|tokenVersion|protectedReference|protectedTemplate|embedding|samples|providerSessionId|ciphertext|faceId|collectionId/i.test(
+              k,
+            )
+              ? undefined
+              : v,
           ),
         );
   await M.AuditLog.create(
     [
       {
         actor: actor?._id,
+        company: actor?.company,
         action,
         entity,
         entityId: String(after?._id || before?._id || ""),

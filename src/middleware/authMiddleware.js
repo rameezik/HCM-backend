@@ -1,6 +1,7 @@
 const jwt = require("jsonwebtoken");
 const M = require("../models");
 const ApiError = require("../utils/ApiError");
+const { withCompany } = require("../services/companyContext");
 async function auth(req, res, next) {
   try {
     const token =
@@ -18,13 +19,28 @@ async function auth(req, res, next) {
     const user = await M.User.findById(payload.sub);
     if (!user || !user.active || user.tokenVersion !== payload.version)
       throw new ApiError(401, "Your session is no longer active.");
+    if (!user.company) {
+      const companies = await M.Company.find().limit(2).select("_id").lean();
+      if (companies.length !== 1)
+        throw new ApiError(
+          403,
+          "This account requires an explicit company assignment.",
+        );
+      user.company = companies[0]._id;
+      await user.save();
+    }
+    if (payload.company && String(user.company) !== payload.company)
+      throw new ApiError(
+        401,
+        "Your company assignment changed. Sign in again.",
+      );
     req.user = user;
     if (
       user.mustChangePassword &&
       !["/auth/me", "/auth/password", "/auth/logout"].includes(req.path)
     )
       throw new ApiError(403, "Change your temporary password first.");
-    next();
+    withCompany(user.company, () => next());
   } catch (error) {
     next(error);
   }

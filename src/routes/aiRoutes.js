@@ -2,6 +2,10 @@ const router = require("express").Router();
 const { z } = require("zod");
 const { rateLimit } = require("express-rate-limit");
 const { run } = require("../services/aiService");
+router.get('/status',(req,res)=>{
+  const configured=Boolean(process.env.AI_API_KEY?.trim());
+  res.set('Cache-Control','no-store').json({configured,features:{chat:configured,summary:configured,smartLeave:configured},...(!configured?{code:'AI_NOT_CONFIGURED',message:'AI features are disabled. Configure AI_API_KEY on the backend to enable them. Authentication and all regular HR workflows remain available.'}:{})});
+});
 router.use(
   rateLimit({
     windowMs: 3600000,

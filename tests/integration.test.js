@@ -5,6 +5,8 @@ const mongoose = require("mongoose");
 const M = require("../src/models");
 const { today, workingDays } = require("../src/services/rules");
 process.env.JWT_SECRET = crypto.randomBytes(48).toString("hex");
+// Run the complete core lifecycle with optional hosted AI deliberately unconfigured.
+delete process.env.AI_API_KEY;
 const dbName = `hcm_test_${process.pid}_${Date.now()}`;
 const passwd = crypto.randomBytes(18).toString("base64url");
 const rotated = crypto.randomBytes(18).toString("base64url");
@@ -562,15 +564,20 @@ test("real MongoDB API lifecycle and role boundaries", async (t) => {
   await t.test(
     "missing AI configuration fails honestly, logs calls, and normal services remain usable",
     async () => {
-      const saved = process.env.AI_API_KEY;
+        const availability = await alice('/ai/status');
+      assert.equal(availability.configured,false);
+      assert.equal(availability.code,'AI_NOT_CONFIGURED');
+      assert.deepEqual(availability.features,{chat:false,summary:false,smartLeave:false});
+    const saved = process.env.AI_API_KEY;
       delete process.env.AI_API_KEY;
       try {
-        await alice(
+        const unavailable = await alice(
           "/ai/chat",
           "POST",
           { message: "What is my sick leave balance?" },
           503,
         );
+        assert.equal(unavailable.code, 'AI_NOT_CONFIGURED');
         assert.equal(
           await M.AiLog.countDocuments({ actor: aliceRecord.user }),
           1,

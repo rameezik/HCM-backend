@@ -1,4 +1,5 @@
 const ApiError = require("../utils/ApiError");
+const { DateTime } = require("luxon");
 const isoDate = (value) =>
   typeof value === "string" &&
   /^\d{4}-\d{2}-\d{2}$/.test(value) &&
@@ -27,14 +28,30 @@ function workingDays(start, end, company, holidays) {
   );
 }
 function attendanceStatus(checkIn, checkOut, rules) {
-  const [h, m] = rules.officeStart.split(":").map(Number);
-  const time = new Date(checkIn);
-  const late =
-    time.getUTCHours() * 60 + time.getUTCMinutes() >
-    h * 60 + m + rules.graceMinutes;
-  const hours = checkOut ? (new Date(checkOut) - time) / 3600000 : 0;
-  if (hours < 0 || hours > 24)
-    throw new ApiError(422, "Check-out must follow check-in within 24 hours.");
+  const time = DateTime.fromJSDate(new Date(checkIn), {
+    zone: rules.timezone || "UTC",
+  });
+  let day = rules.businessDate || time.toISODate();
+  if (
+    !rules.businessDate &&
+    (rules.officeEnd || "17:00") <= rules.officeStart &&
+    time.toFormat("HH:mm") < rules.officeEnd
+  )
+    day = time.minus({ days: 1 }).toISODate();
+  const scheduled = DateTime.fromISO(`${day}T${rules.officeStart}`, {
+    zone: rules.timezone || "UTC",
+  }).plus({ minutes: rules.graceMinutes });
+  if (!time.isValid || !scheduled.isValid)
+    throw new ApiError(422, "Invalid attendance time or timezone.");
+  const late = time.toMillis() > scheduled.toMillis();
+  const hours = checkOut
+    ? (new Date(checkOut) - new Date(checkIn)) / 3600000
+    : 0;
+  if (hours < 0 || hours > (rules.maxShiftHours || 24))
+    throw new ApiError(
+      422,
+      "Check-out must follow check-in within the maximum shift duration.",
+    );
   return {
     late,
     hours,

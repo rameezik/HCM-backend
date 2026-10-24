@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const { Schema } = mongoose;
+const { companyPlugin } = require("../services/companyContext");
 const ref = (name, required = true) => ({
   type: Schema.Types.ObjectId,
   ref: name,
@@ -7,6 +8,9 @@ const ref = (name, required = true) => ({
 });
 const model = (name, fields, indexes = []) => {
   const schema = new Schema(fields, { timestamps: true, strict: "throw" });
+  schema.plugin(companyPlugin, { companyModel: name === "Company" });
+  const scopedKeys = { Department: "name", Designation: "name", LeaveType: "name", Holiday: "date", Employee: "code", Payroll: "month" };
+  if (scopedKeys[name]) schema.index({company:1,[scopedKeys[name]]:1},{unique:true});
   for (const [keys, options] of indexes) schema.index(keys, options);
   return mongoose.model(name, schema, name === "AiLog" ? "ai_logs" : undefined);
 };
@@ -24,6 +28,9 @@ const Company = model("Company", {
   singleton: { type: String, default: "company", unique: true },
   name: { type: String, required: true },
   officeStart: { type: String, default: "09:00" },
+  officeEnd: { type: String, default: "17:00" },
+  maxShiftHours: { type: Number, default: 20 },
+  biometricRetentionDays: { type: Number, default: 365 },
   graceMinutes: { type: Number, default: 15 },
   halfDayHours: { type: Number, default: 5 },
   weekend: { type: [Number], default: [0, 6] },
@@ -33,23 +40,23 @@ const Company = model("Company", {
   timezone: { type: String, default: "UTC" },
 });
 const Department = model("Department", {
-  name: { type: String, required: true, unique: true },
+  name: { type: String, required: true },
 });
 const Designation = model("Designation", {
-  name: { type: String, required: true, unique: true },
+  name: { type: String, required: true },
 });
 const LeaveType = model("LeaveType", {
-  name: { type: String, required: true, unique: true },
+  name: { type: String, required: true },
   quota: { type: Number, default: 0 },
   unpaid: { type: Boolean, default: false },
 });
 const Holiday = model("Holiday", {
   name: { type: String, required: true },
-  date: { type: String, required: true, unique: true },
+  date: { type: String, required: true },
 });
 const Employee = model("Employee", {
   user: ref("User"),
-  code: { type: String, required: true, unique: true },
+  code: { type: String, required: true },
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true },
   department: ref("Department"),
@@ -81,8 +88,15 @@ const Attendance = model(
     },
     hours: { type: Number, default: 0 },
     rules: Schema.Types.Mixed,
+    verificationMethod: {
+      type: String,
+      enum: ["web", "face", "hr-correction"],
+      default: "web",
+    },
+    verification: Schema.Types.Mixed,
+    checkOutVerification: Schema.Types.Mixed,
   },
-  [[{ employee: 1, date: 1 }, { unique: true }]],
+  [[{ company: 1, employee: 1, date: 1 }, { unique: true }]],
 );
 const Correction = model("Correction", {
   employee: ref("Employee"),
@@ -116,7 +130,7 @@ const Leave = model("Leave", {
   decidedBy: ref("User", false),
 });
 const Payroll = model("Payroll", {
-  month: { type: String, required: true, unique: true },
+  month: { type: String, required: true },
   status: { type: String, enum: ["draft", "finalized"], default: "draft" },
   slips: [
     new Schema(
@@ -172,7 +186,71 @@ const AiLog = model("AiLog", {
   tools: [String],
   error: String,
 });
+const protectedReference = new Schema(
+  { ciphertext: String, iv: String, tag: String, keyVersion: String },
+  { _id: false },
+);
+const BiometricEnrollment = model(
+  "BiometricEnrollment",
+  {
+    employee: ref("Employee"),
+    provider: { type: String, default: "local-opencv-sface" },
+    status: {
+      type: String,
+      enum: ["active", "provisioning", "deleting", "delete_failed"],
+      default: "active",
+    },
+    protectedReference: { type: protectedReference, select: false },
+    protectedTemplate: { type: protectedReference, select: false },
+    modelVersion: String,
+    consentAt: Date,
+    consentVersion: String,
+    enrolledAt: Date,
+    expiresAt: { type: Date, index: true },
+    lastVerifiedAt: Date,
+    deleteRequestedAt: Date,
+  },
+  [[{ company: 1, employee: 1 }, { unique: true }]],
+);
+const BiometricChallenge = model(
+  "BiometricChallenge",
+  {
+    employee: ref("Employee"),
+    user: ref("User"),
+    purpose: {
+      type: String,
+      enum: ["enroll", "check-in", "check-out"],
+      required: true,
+    },
+    providerSessionId: { type: String, select: false },
+    provider: String,
+    consentVersion: String,
+    consentAt: Date,
+    expiresAt: Date,
+    state: {
+      type: String,
+      enum: ["created", "verifying", "completed", "failed"],
+      default: "created",
+    },
+    attempts: { type: Number, default: 0 },
+    consumedAt: Date,
+    failureCode: String,
+  },
+  [
+    [{ company: 1, employee: 1, createdAt: -1 }, {}],
+    [{ expiresAt: 1 }, { expireAfterSeconds: 86400 }],
+    [
+      { company: 1, purpose: 1, state: 1 },
+      {
+        unique: true,
+        partialFilterExpression: { purpose: "enroll", state: "verifying" },
+      },
+    ],
+  ],
+);
 module.exports = {
+  BiometricEnrollment,
+  BiometricChallenge,
   User,
   Company,
   Department,

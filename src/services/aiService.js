@@ -100,11 +100,10 @@ async function run(user, body) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
   try {
-    if (!process.env.AI_API_KEY)
-      throw new E(
-        503,
-        "AI is not configured. Your regular forms and reports are available.",
-      );
+    if (!process.env.AI_API_KEY?.trim()) {
+      const error=new E(503,'AI features are disabled because AI_API_KEY is not configured on the backend. Use the regular forms and reports.');
+      error.code='AI_NOT_CONFIGURED';throw error;
+    }
     const endpoint = new URL(
       process.env.AI_BASE_URL || "https://api.groq.com/openai/v1",
     );

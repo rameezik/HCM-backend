@@ -8,5 +8,7 @@ module.exports = async function connect() {
   await mongoose.connect(process.env.MONGODB_URI, {
     serverSelectionTimeoutMS: 10000,
   });
+  await require("../services/migrateCompany")();
   await Promise.all(Object.values(models).map((model) => model.init()));
+  await require("../services/migrateTenantIndexes")();
 };
