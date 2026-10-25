@@ -40,3 +40,27 @@ test("missing signing keys fail with actionable instructions instead of insecure
     /hosting environment/,
   );
 });
+test('local setup works without an example file and preserves generated keys on repeated setup', () => {
+  const { spawnSync } = require('node:child_process');
+  const dotenv = require('dotenv');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hcm-env-setup-'));
+  try {
+    fs.mkdirSync(path.join(dir, 'scripts'));
+    fs.copyFileSync(path.join(__dirname, '../scripts/setup-env.js'), path.join(dir, 'scripts/setup-env.js'));
+    const env = { ...process.env, NODE_ENV: 'development', NODE_PATH: path.join(__dirname, '../node_modules') };
+    delete env.JWT_SECRET;
+    delete env.BIOMETRIC_TEMPLATE_KEY;
+    const run = () => spawnSync(process.execPath, [path.join(dir, 'scripts/setup-env.js')], { env, encoding: 'utf8' });
+    assert.equal(run().status, 0);
+    const first = dotenv.parse(fs.readFileSync(path.join(dir, '.env')));
+    assert.equal(first.PORT, '4000');
+    assert.match(first.MONGODB_URI, /^mongodb:\/\/127\.0\.0\.1/);
+    assert.ok(first.JWT_SECRET.length >= 32);
+    assert.ok(Buffer.from(first.BIOMETRIC_TEMPLATE_KEY, 'base64').length === 32);
+    assert.equal(fs.statSync(path.join(dir, '.env')).mode & 0o777, 0o600);
+    assert.equal(run().status, 0);
+    const next = dotenv.parse(fs.readFileSync(path.join(dir, '.env')));
+    assert.ok(first.JWT_SECRET === next.JWT_SECRET);
+    assert.ok(first.BIOMETRIC_TEMPLATE_KEY === next.BIOMETRIC_TEMPLATE_KEY);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

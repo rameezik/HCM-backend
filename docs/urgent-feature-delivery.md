@@ -43,7 +43,9 @@ Use the supplied `Dockerfile` and `render.yaml` for the Render backend. Model fi
 
 ## Verification
 
-The final full backend suite passed **98/98**, zero failed/skipped. The frontend protocol suite passed **7/7**, lint passed and the 52-route production build passed. Focused account/department tests use actual isolated MongoDB/API operations, including concurrent Admin changes, role boundaries and reference-safe deletion.
+The final full backend suite passed **98/98**, zero failed/skipped. The frontend protocol suite passed **7/7**, lint passed and the production build passed with 52 static pages and the dynamic API proxy. Focused account/department tests use actual isolated MongoDB/API operations, including concurrent Admin changes, role boundaries and reference-safe deletion.
+
+Newer upstream commits were merged without rewriting history. Their removal of `.env.example` exposed a fresh-install setup failure; local setup now uses non-secret defaults when that optional template is absent, generates private keys and preserves them on repeat setup. All three focused environment checks passed after the merge, and both normal application health endpoints remained connected to MongoDB.
 
 The real Chromium runner `/workspace/onboarding/browser/urgent-features.cjs` passed every acceptance workflow: Admin created the department, designation, HR login and employee/account/assignment through visible frontend forms; HR and Employee logged in with their own credentials and completed forced password rotation; each reached the correct dashboard. The employee enrolled with consent using actual browser camera/canvas samples and local SFace inference. A real Grace Hopper fixture mismatch returned 422 and created no attendance. The NASA fixture camera then completed face check-in/check-out with server-timestamp UI confirmations, duplicate prevention 409 and saved MongoDB history after refresh. HR saw the saved record; Admin saw actual company counts and charts. Cross-company access and employee privilege requests were rejected, and no browser runtime/hydration errors were observed.
 

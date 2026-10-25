@@ -9,9 +9,12 @@ if (process.env.NODE_ENV === "production") {
     "Set deployment secrets in the hosting environment; local key generation is for development only.",
   );
 }
+const example = path.join(root, '.env.example');
 let contents = fs.existsSync(file)
   ? fs.readFileSync(file, "utf8")
-  : fs.readFileSync(path.join(root, ".env.example"), "utf8");
+  : fs.existsSync(example)
+    ? fs.readFileSync(example, "utf8")
+    : 'NODE_ENV=development\nPORT=4000\nMONGODB_URI=mongodb://127.0.0.1:27017/hcm_lite?replicaSet=hcm\nFRONTEND_URL=http://localhost:3000,http://127.0.0.1:3000\n';
 const values = dotenv.parse(contents);
 if (process.env.JWT_SECRET && process.env.JWT_SECRET.trim().length < 32) {
   throw new Error(
