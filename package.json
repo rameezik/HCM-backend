@@ -18,8 +18,8 @@
   "name": "hcm-backend",
   "private": true,
   "scripts": {
-    "start": "node --use-env-proxy server.js",
-    "dev": "node --use-env-proxy --watch server.js",
+    "start": "node server.js",
+    "dev": "node --watch server.js",
     "test": "node --test tests/*.test.js",
     "setup:env": "node scripts/setup-env.js",
     "setup:face": "bash scripts/setup-local-face.sh"
