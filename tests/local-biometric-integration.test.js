@@ -75,6 +75,8 @@ test('real local SFace inference drives isolated encrypted enrollment and attend
     try {
       const status = await request(employee, '/biometrics/status');
       assert.equal(status.configured, false);
+      assert.ok(status.missingConfiguration.includes('face_detection_yunet_2023mar.onnx'));
+      assert.equal(status.officeConfigured, true);
       assert.match(status.unavailableReason, /model|configuration|local/i);
       await request(employee, '/biometrics/challenges', 'POST', { purpose: 'enroll', consent: true, consentVersion: service.CONSENT_VERSION }, 503);
       assert.equal(await M.BiometricChallenge.countDocuments(), 0);
@@ -118,6 +120,9 @@ test('real local SFace inference drives isolated encrypted enrollment and attend
   await t.test('actual local detection, alignment and embedding inference enroll an encrypted template', async () => {
     const status = await request(employee, '/biometrics/status');
     assert.equal(status.configured, true);
+    assert.equal(status.officeConfigured, true);
+    assert.deepEqual(status.missingConfiguration, []);
+    assert.equal(status.attendance, null);
     assert.equal(status.provider, 'local-opencv-sface');
     assert.match(status.consent.notice, /local/i);
     enrollmentSession = await challenge(employee, 'enroll');
@@ -152,6 +157,11 @@ test('real local SFace inference drives isolated encrypted enrollment and attend
     assert.equal(record.verificationMethod, 'face');
     assert.equal(record.verification.provider, 'local-opencv-sface');
     assert.ok(record.checkIn);
+    const liveStatus = await request(employee, '/biometrics/status');
+    assert.equal(liveStatus.attendance.checkIn, record.checkIn);
+    assert.equal(liveStatus.attendance.checkOut, undefined);
+    assert.equal(liveStatus.attendance.verificationMethod, 'face');
+    assert.equal(JSON.stringify(liveStatus).includes('protectedTemplate'), false);
     assert.equal(record.verification.livenessConfidence, undefined);
     assert.equal(record.verification.livenessVerified, false);
     const actual = await request(employee, '/attendance/analytics');
@@ -172,6 +182,7 @@ test('real local SFace inference drives isolated encrypted enrollment and attend
     const session = await challenge(employee, 'check-out');
     const record = await submitAttendance(employee, session, 'check-out');
     assert.ok(record.checkOut);
+    assert.equal((await request(employee, '/biometrics/status')).attendance.checkOut, record.checkOut);
     assert.equal(record.checkOutVerification.provider, 'local-opencv-sface');
     assert.equal(record.hours, (new Date(record.checkOut) - new Date(record.checkIn)) / 3600000);
     const actual = await request(employee, '/attendance/analytics');

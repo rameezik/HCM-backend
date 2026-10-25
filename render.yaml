@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: hcm-lite-backend
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGODB_URI
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      # Supply base64 of exactly32 random bytes. Preserve the same value on
+      # redeployments; do not use Render's generic hex generator for this key.
+      - key: BIOMETRIC_TEMPLATE_KEY
+        sync: false
+      - key: BIOMETRIC_TEMPLATE_KEY_ID
+        value: v1
+      - key: BIOMETRIC_MATCH_THRESHOLD
+        value: "0.363"
+      - key: BIOMETRIC_RETENTION_DAYS
+        value: "365"
+      # Exact HTTPS Vercel origin, e.g. https://your-project.vercel.app.
+      - key: FRONTEND_URL
+        sync: false
+      # Render terminates HTTPS at its immediate ingress proxy. This is a
+      # numeric one-hop setting, not an instruction to trust arbitrary proxies.
+      - key: TRUST_PROXY
+        value: "1"

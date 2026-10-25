@@ -1,0 +1,17 @@
+.git
+node_modules
+.npmrc
+*.pem
+*.key
+*.crt
+.local-face-venv
+.env
+.env.*
+!.env.example
+*.log
+logs
+coverage
+tests
+models/local-face/*.onnx
+**/__pycache__
+**/*.pyc

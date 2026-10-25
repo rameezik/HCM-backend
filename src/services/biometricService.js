@@ -166,10 +166,31 @@ async function status(user) {
   const enrollment = linked
     ? await M.BiometricEnrollment.findOne(ownFilter(user)).lean()
     : null;
+  const office = user.company
+    ? await M.Company.findOne({ _id: user.company })
+        .select("latitude longitude radius")
+        .lean()
+    : null;
+  const officeConfigured = Boolean(
+    office &&
+      Number.isFinite(office.latitude) &&
+      Number.isFinite(office.longitude) &&
+      Number.isFinite(office.radius) &&
+      office.radius > 0,
+  );
+  const attendance = linked
+    ? await M.Attendance.findOne(ownFilter(user))
+        .sort({ checkIn: -1 })
+        .select("date checkIn checkOut status hours verificationMethod")
+        .lean()
+    : null;
   return {
     configured,
     provider: provider.PROVIDER,
     modelVersion: config.modelVersion,
+    officeConfigured,
+    missingConfiguration: [...new Set(missing)],
+    attendance,
     liveness: {
       supported: false,
       notice:
@@ -189,7 +210,9 @@ async function status(user) {
     ...(!configured
       ? {
           unavailableReason: linked
-            ? "Local face verification is unavailable. Install the local models/runtime with bash scripts/setup-local-face.sh and configure the biometric encryption key with npm run setup:env. Ordinary web attendance remains available."
+            ? process.env.NODE_ENV === "production"
+              ? "Your company’s face attendance service needs setup. Ask your administrator to install the local recognition runtime and models and configure the backend biometric encryption key. Manual attendance remains available."
+              : "Local face verification is unavailable. Install the local models/runtime with npm run setup:face and configure the biometric encryption key with npm run setup:env. Ordinary web attendance remains available."
             : "A linked employee profile is required.",
         }
       : {}),

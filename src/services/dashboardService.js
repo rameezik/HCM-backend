@@ -347,6 +347,68 @@ async function dashboard(user, query = {}, options = {}) {
       .sort((a, b) => b.count - a.count)
       .slice(0, 5),
   };
+  if (["admin", "hr"].includes(user.role)) {
+    // These operational counters describe the current company, independently
+    // of the historical reporting range/department filters above.
+    const companyFilter = { company: company._id };
+    const [
+      totalEmployees,
+      activeEmployees,
+      totalDepartments,
+      totalHrUsers,
+      activeHrUsers,
+      pendingLeaveRequests,
+      currentRows,
+    ] = await Promise.all([
+      M.Employee.countDocuments(companyFilter),
+      M.Employee.countDocuments({
+        ...companyFilter,
+        joinDate: { $lte: asOf },
+        $or: [
+          { exitDate: { $exists: false } },
+          { exitDate: "" },
+          { exitDate: null },
+          { exitDate: { $gt: asOf } },
+        ],
+      }),
+      M.Department.countDocuments(companyFilter),
+      M.User.countDocuments({ ...companyFilter, role: "hr" }),
+      M.User.countDocuments({ ...companyFilter, role: "hr", active: true }),
+      M.Leave.countDocuments({ ...companyFilter, status: "pending" }),
+      query.department
+        ? board(user, { start: asOf, end: asOf }, undefined, { now })
+        : Promise.resolve(todayRows),
+    ]);
+    result.companySummary = {
+      date: asOf,
+      totalEmployees,
+      activeEmployees,
+      totalDepartments,
+      totalHrUsers,
+      activeHrUsers,
+      presentEmployees: currentRows.filter((row) =>
+        ["present", "late", "half_day", "missing_checkout"].includes(
+          row.status,
+        ),
+      ).length,
+      absentEmployees: currentRows.filter((row) => row.status === "absent")
+        .length,
+      onLeaveEmployees: currentRows.filter((row) => row.status === "on_leave")
+        .length,
+      lateEmployees: currentRows.filter((row) => row.late).length,
+      pendingLeaveRequests,
+      todayAttendance: currentRows.map((row) => ({
+        employee: row.employee,
+        date: row.date,
+        status: row.status,
+        checkIn: row.checkIn || null,
+        checkOut: row.checkOut || null,
+        hours: row.hours,
+        late: row.late,
+        verificationMethod: row.verificationMethod || null,
+      })),
+    };
+  }
   if (user.employee) {
     result.leaveBalance = await balances(user);
     const weekStart = new Date(`${asOf}T00:00:00.000Z`);

@@ -281,17 +281,96 @@ const catalogs = {
   ],
   holidays: [M.Holiday, z.object({ name: text, date }).strict()],
 };
+const accountProjection = "name email role active mustChangePassword";
+async function lockAdminManagement(actor, session) {
+  if (actor.role !== "admin") return;
+  // Serialize privileged account changes per company, then recheck the actor.
+  // This prevents two simultaneous administrators from disabling each other.
+  requireDoc(
+    await M.Company.findOneAndUpdate(
+      { _id: actor.company },
+      { $inc: { __v: 1 } },
+      { session, returnDocument: "after" },
+    ),
+  );
+  const current = await M.User.findOne({
+    _id: actor._id,
+    role: "admin",
+    active: true,
+    tokenVersion: actor.tokenVersion,
+  }).session(session);
+  if (!current)
+    throw new E(401, "Your administrator session changed. Sign in again.");
+}
+async function guardAccountChange(actor, target, changes, session) {
+  if (String(actor._id) === String(target._id)) {
+    if (changes.active === false || (changes.role && changes.role !== "admin"))
+      throw new E(
+        403,
+        "You cannot deactivate or demote your own administrator account.",
+      );
+    if (changes.password)
+      throw new E(403, "Use your own password change flow for your account.");
+  }
+  if (
+    target.role === "admin" &&
+    target.active &&
+    (changes.active === false || (changes.role && changes.role !== "admin")) &&
+    (await M.User.countDocuments({ role: "admin", active: true }).session(
+      session,
+    )) <= 1
+  )
+    throw new E(409, "The company must retain an active administrator.");
+  if (changes.role === "employee" && !target.employee)
+    throw new E(
+      422,
+      "An employee login requires a linked employee profile. Create it through Employees.",
+    );
+  if (
+    changes.active === true &&
+    target.employee &&
+    (await M.Employee.exists({
+      _id: target.employee,
+      status: "exited",
+    }).session(session))
+  )
+    throw new E(
+      422,
+      "Update the employee's exited employment status before activating the account.",
+    );
+}
+async function employeeView(employeeId) {
+  return M.Employee.findById(employeeId)
+    .populate("department designation")
+    .populate("user", accountProjection);
+}
 for (const [path, [Model, schema]] of Object.entries(catalogs)) {
+  const managers = ["departments", "designations"].includes(path)
+    ? ["admin", "hr"]
+    : ["admin"];
   router.get(
     `/${path}`,
     ...(path === "leave-types" ? [] : [roles("admin", "hr")]),
-    wrap(async (req, res) =>
-      res.json(await Model.find().sort({ name: 1 }).lean()),
-    ),
+    wrap(async (req, res) => {
+      const rows = await Model.find().sort({ name: 1 }).lean();
+      if (path !== "departments") return res.json(rows);
+      const counts = await M.Employee.aggregate([
+        { $group: { _id: "$department", employeeCount: { $sum: 1 } } },
+      ]);
+      const byId = new Map(
+        counts.map((row) => [String(row._id), row.employeeCount]),
+      );
+      res.json(
+        rows.map((row) => ({
+          ...row,
+          employeeCount: byId.get(String(row._id)) || 0,
+        })),
+      );
+    }),
   );
   router.post(
     `/${path}`,
-    roles("admin"),
+    roles(...managers),
     wrap(async (req, res) => {
       const body = validate(schema, req.body);
       const doc = await C.transaction(async (session) => {
@@ -311,7 +390,7 @@ for (const [path, [Model, schema]] of Object.entries(catalogs)) {
   );
   router.put(
     `/${path}/:id`,
-    roles("admin"),
+    roles(...managers),
     wrap(async (req, res) => {
       const body = validate(schema, req.body);
       id.parse(req.params.id);
@@ -337,6 +416,42 @@ for (const [path, [Model, schema]] of Object.entries(catalogs)) {
       res.json(doc);
     }),
   );
+  if (["departments", "designations"].includes(path))
+    router.delete(
+      `/${path}/:id`,
+      roles(...managers),
+      wrap(async (req, res) => {
+        id.parse(req.params.id);
+        const field = path === "departments" ? "department" : "designation";
+        await C.transaction(async (session) => {
+          const before = requireDoc(
+            await Model.findById(req.params.id).session(session).lean(),
+          );
+          if (
+            (await M.Employee.exists({ [field]: before._id }).session(
+              session,
+            )) ||
+            (await M.Payroll.exists({ [`slips.${field}`]: before._id }).session(
+              session,
+            ))
+          )
+            throw new E(
+              409,
+              `This ${field} is referenced by employee or payroll records and cannot be removed.`,
+            );
+          await Model.deleteOne({ _id: before._id }, { session });
+          await C.audit(
+            session,
+            req.user,
+            "delete",
+            Model.modelName,
+            before,
+            null,
+          );
+        });
+        res.json({ deleted: true });
+      }),
+    );
 }
 router.get(
   "/users",
@@ -351,11 +466,24 @@ router.post(
   wrap(async (req, res) => {
     const body = validate(
       z
-        .object({ name: text, email, password, employee: id.optional() })
+        .object({
+          name: text,
+          email,
+          password,
+          employee: id.optional(),
+          role: z.enum(["admin", "hr", "employee"]).default("hr"),
+          active: z.boolean().default(true),
+        })
         .strict(),
       req.body,
     );
     const doc = await C.transaction(async (session) => {
+      await lockAdminManagement(req.user, session);
+      if (body.role === "employee" && !body.employee)
+        throw new E(
+          422,
+          "Create a new employee and linked login through Employees.",
+        );
       if (body.employee) {
         const emp = requireDoc(
           await M.Employee.findById(body.employee).session(session),
@@ -363,6 +491,7 @@ router.post(
         const existing = await M.User.findById(emp.user).session(session);
         if (existing?.role !== "employee")
           throw new E(422, "Employee is already linked to a staff login.");
+        await guardAccountChange(req.user, existing, body, session);
       }
       let after;
       if (body.employee) {
@@ -372,12 +501,18 @@ router.post(
           {
             name: body.name,
             email: body.email,
-            role: "hr",
+            role: body.role,
+            active: body.active,
             passwordHash: await bcrypt.hash(body.password, 12),
             mustChangePassword: true,
             $inc: { tokenVersion: 1 },
           },
           { returnDocument: "after", session },
+        );
+        await M.Employee.updateOne(
+          { _id: emp._id },
+          { name: body.name, email: body.email },
+          { session },
         );
       } else
         [after] = await M.User.create(
@@ -386,7 +521,8 @@ router.post(
               name: body.name,
               email: body.email,
               passwordHash: await bcrypt.hash(body.password, 12),
-              role: "hr",
+              role: body.role,
+              active: body.active,
             },
           ],
           { session },
@@ -394,7 +530,7 @@ router.post(
       await C.audit(
         session,
         req.user,
-        "create_hr",
+        body.role === "hr" ? "create_hr" : "create_account",
         "User",
         null,
         userView(after),
@@ -414,21 +550,20 @@ router.patch(
         .object({
           active: z.boolean().optional(),
           password: password.optional(),
+          role: z.enum(["admin", "hr", "employee"]).optional(),
         })
         .strict(),
       req.body,
     );
     const doc = await C.transaction(async (session) => {
+      await lockAdminManagement(req.user, session);
       const user = requireDoc(
         await M.User.findById(req.params.id).session(session),
       );
-      if (user.role === "admin")
-        throw new E(
-          403,
-          "Use your own password change flow for the Admin account.",
-        );
+      await guardAccountChange(req.user, user, body, session);
       const before = userView(user);
       if (body.active !== undefined) user.active = body.active;
+      if (body.role !== undefined) user.role = body.role;
       if (body.password) {
         user.passwordHash = await bcrypt.hash(body.password, 12);
         user.mustChangePassword = true;
@@ -473,18 +608,36 @@ const employeeSchema = z
   })
   .strict();
 async function employeeReferences(body, session) {
-  requireDoc(
-    await M.Department.findById(body.department).session(session || null),
-  );
-  requireDoc(
-    await M.Designation.findById(body.designation).session(session || null),
-  );
+  // Assignments and safe deletion lock the same catalog document. A catalog
+  // cannot disappear between validation and committing an employee assignment.
+  for (const [Model, value] of [
+    [M.Department, body.department],
+    [M.Designation, body.designation],
+  ])
+    requireDoc(
+      session
+        ? await Model.findOneAndUpdate(
+            { _id: value },
+            { $inc: { __v: 1 } },
+            { session, returnDocument: "after" },
+          )
+        : await Model.findById(value),
+    );
   if (body.exitDate && body.exitDate < body.joinDate)
     throw new E(422, "Exit date precedes joining date.");
   if (body.status === "exited" && !body.exitDate)
     throw new E(422, "Exit date is required for an exited employee.");
 }
-async function createEmployee(body, temporaryPassword, actor, session) {
+async function createEmployee(
+  body,
+  temporaryPassword,
+  actor,
+  session,
+  role = "employee",
+) {
+  if (actor.role !== "admin" && role !== "employee")
+    throw new E(403, "Only Admin can assign HR or Admin roles.");
+  await lockAdminManagement(actor, session);
   await employeeReferences(body, session);
   const [user] = await M.User.create(
     [
@@ -492,7 +645,8 @@ async function createEmployee(body, temporaryPassword, actor, session) {
         name: body.name,
         email: body.email,
         passwordHash: await bcrypt.hash(temporaryPassword, 12),
-        role: "employee",
+        role,
+        active: body.status !== "exited",
       },
     ],
     { session },
@@ -530,6 +684,7 @@ router.get(
     const total = await M.Employee.countDocuments(filter);
     const items = await M.Employee.find(filter)
       .populate("department designation")
+      .populate("user", accountProjection)
       .sort({ name: 1 })
       .skip((q.page - 1) * q.limit)
       .limit(q.limit)
@@ -539,20 +694,27 @@ router.get(
 );
 router.post(
   "/employees",
-  roles("hr"),
+  roles("admin", "hr"),
   wrap(async (req, res) => {
-    const { password: temporaryPassword, ...raw } = req.body;
+    const {
+      password: temporaryPassword,
+      role: requestedRole = "employee",
+      ...raw
+    } = req.body;
     password.parse(temporaryPassword);
+    const role = z.enum(["admin", "hr", "employee"]).parse(requestedRole);
+    if (req.user.role !== "admin" && role !== "employee")
+      throw new E(403, "Only Admin can assign HR or Admin roles.");
     const body = employeeSchema.parse(raw);
     const doc = await C.transaction((session) =>
-      createEmployee(body, temporaryPassword, req.user, session),
+      createEmployee(body, temporaryPassword, req.user, session, role),
     );
-    res.status(201).json(doc);
+    res.status(201).json(await employeeView(doc._id));
   }),
 );
 router.get(
   "/employees/export",
-  roles("hr"),
+  roles("admin", "hr"),
   wrap(async (req, res) => {
     const employees = await M.Employee.find().lean();
     const keys = [
@@ -588,7 +750,7 @@ router.get(
 );
 router.post(
   "/employees/import",
-  roles("hr"),
+  roles("admin", "hr"),
   wrap(async (req, res) => {
     const body = z
       .object({
@@ -678,6 +840,7 @@ router.get(
         $and: [{ _id: req.params.id }, C.employeeScope(req.user)],
       })
         .populate("department designation")
+        .populate("user", accountProjection)
         .lean(),
     );
     const attendance = await M.Attendance.find({ employee: employee._id })
@@ -694,9 +857,14 @@ router.get(
 );
 router.patch(
   "/employees/:id",
-  roles("hr", "employee"),
+  roles("admin", "hr", "employee"),
   wrap(async (req, res) => {
     id.parse(req.params.id);
+    const { role: requestedRole, ...employeeFields } = req.body;
+    if (requestedRole !== undefined)
+      z.enum(["admin", "hr", "employee"]).parse(requestedRole);
+    if (requestedRole !== undefined && req.user.role !== "admin")
+      throw new E(403, "Only Admin can change an employee's account role.");
     const body =
       req.user.role === "employee"
         ? z
@@ -706,15 +874,36 @@ router.patch(
             })
             .strict()
             .parse(req.body)
-        : employeeSchema.parse(req.body);
+        : employeeSchema.parse(employeeFields);
     const doc = await C.transaction(async (session) => {
+      if (req.user.role === "admin")
+        await lockAdminManagement(req.user, session);
       const employee = requireDoc(
         await M.Employee.findOne({
           $and: [{ _id: req.params.id }, C.employeeScope(req.user)],
         }).session(session),
       );
+      const login = requireDoc(
+        await M.User.findById(employee.user).session(session),
+      );
+      if (req.user.role === "hr" && login.role !== "employee")
+        throw new E(
+          403,
+          "HR can edit employee accounts only. Admin manages privileged staff profiles.",
+        );
+      if (req.user.role === "admin")
+        await guardAccountChange(
+          req.user,
+          login,
+          {
+            ...(requestedRole === undefined ? {} : { role: requestedRole }),
+            ...(body.status === "exited" ? { active: false } : {}),
+          },
+          session,
+        );
       const before = employee.toObject();
-      if (req.user.role === "hr") await employeeReferences(body, session);
+      if (["admin", "hr"].includes(req.user.role))
+        await employeeReferences(body, session);
       Object.assign(employee, body);
       await employee.save({ session });
       if (employee.status === "exited")
@@ -723,28 +912,36 @@ router.patch(
           { $set: { status: "deleting", deleteRequestedAt: new Date() } },
           { session },
         );
-      if (req.user.role === "hr") {
-        const login = requireDoc(
-          await M.User.findById(employee.user).select("email").session(session),
-        );
+      if (["admin", "hr"].includes(req.user.role)) {
         // Session versions also bind reset links sent to the former mailbox.
         const revokeSessions =
-          employee.status === "exited" || login.email !== employee.email;
-        await M.User.updateOne(
+          employee.status === "exited" ||
+          login.email !== employee.email ||
+          (requestedRole !== undefined && requestedRole !== login.role);
+        const updatedLogin = await M.User.findOneAndUpdate(
           { _id: employee.user },
           {
             name: employee.name,
             email: employee.email,
+            ...(requestedRole === undefined ? {} : { role: requestedRole }),
             ...(employee.status === "exited" ? { active: false } : {}),
             ...(revokeSessions ? { $inc: { tokenVersion: 1 } } : {}),
           },
-          { session },
+          { session, returnDocument: "after" },
+        );
+        await C.audit(
+          session,
+          req.user,
+          "update_login",
+          "User",
+          userView(login),
+          userView(updatedLogin),
         );
       }
       await C.audit(session, req.user, "update", "Employee", before, employee);
       return employee;
     });
-    res.json(doc);
+    res.json(await employeeView(doc._id));
   }),
 );
 router.get(
@@ -859,7 +1056,7 @@ router.post(
 );
 router.patch(
   "/corrections/:id",
-  roles("hr"),
+  roles("admin", "hr"),
   wrap(async (req, res) => {
     id.parse(req.params.id);
     const body = z
@@ -1048,7 +1245,7 @@ router.post(
 );
 router.patch(
   "/leave/:id",
-  roles("hr", "employee"),
+  roles("admin", "hr", "employee"),
   wrap(async (req, res) => {
     id.parse(req.params.id);
     const body = z
@@ -1063,7 +1260,11 @@ router.patch(
         await M.Leave.findById(req.params.id).session(session),
       );
       const own = String(leave.employee) === String(req.user.employee);
-      if (body.status === "cancelled" ? !own : req.user.role !== "hr" || own)
+      if (
+        body.status === "cancelled"
+          ? !own
+          : !["admin", "hr"].includes(req.user.role) || own
+      )
         throw new E(403, "You cannot make this leave decision.");
       if (
         body.status === "cancelled"
@@ -1134,7 +1335,7 @@ router.get(
 );
 router.post(
   "/payroll",
-  roles("hr"),
+  roles("admin", "hr"),
   wrap(async (req, res) => {
     const { month } = z
       .object({ month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/) })

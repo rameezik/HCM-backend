@@ -4,14 +4,13 @@ const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const { rateLimit } = require("express-rate-limit");
 const { ZodError } = require("zod");
+const { trustProxy, frontendOrigins } = require("./config/httpConfiguration");
 const app = express();
 app.disable("x-powered-by");
 // Trust only explicitly known reverse proxies when deriving HTTPS for face capture.
-app.set("trust proxy", process.env.TRUST_PROXY || "loopback");
+app.set("trust proxy", trustProxy());
 app.use(helmet());
-const origins = (
-  process.env.FRONTEND_URL || "http://localhost:3000,http://127.0.0.1:3000"
-).split(",");
+const origins = frontendOrigins();
 app.use(
   cors({
     origin: (origin, callback) =>
@@ -46,18 +45,18 @@ app.use((req, res) =>
 );
 app.use((error, req, res, next) => {
   if (res.headersSent) return next(error);
-  if (error.type === 'entity.parse.failed')
-    return res.status(400).json({ message: 'Request body must contain valid JSON.' });
-  if (error instanceof ZodError)
+  if (error.type === "entity.parse.failed")
     return res
-      .status(422)
-      .json({
-        message: "Check the form fields.",
-        details: error.issues.map((i) => ({
-          field: i.path.join("."),
-          reason: i.message,
-        })),
-      });
+      .status(400)
+      .json({ message: "Request body must contain valid JSON." });
+  if (error instanceof ZodError)
+    return res.status(422).json({
+      message: "Check the form fields.",
+      details: error.issues.map((i) => ({
+        field: i.path.join("."),
+        reason: i.message,
+      })),
+    });
   if (error.code === 11000)
     return res
       .status(409)
@@ -69,22 +68,20 @@ app.use((error, req, res, next) => {
   )
     return res.status(422).json({ message: "Invalid record fields." });
   if (error.message?.includes("Transaction numbers are only allowed"))
-    return res
-      .status(503)
-      .json({
-        message:
-          "MongoDB must run as a replica set to support atomic workflows.",
-      });
+    return res.status(503).json({
+      message: "MongoDB must run as a replica set to support atomic workflows.",
+    });
   const status = error.status || 500;
   if (status >= 500)
     console.error("API failure:", error.name, error.code || status);
-  res
-    .status(status)
-    .json({
-      message:
-        status === 500 ? "An unexpected server error occurred." : error.message,
-      ...(error.details ? { details: error.details } : {}),
-      ...(typeof error.code === "string" && /^(?:AI_|AUTH_|BIOMETRIC_)/.test(error.code) ? {code:error.code} : {}),
-    });
+  res.status(status).json({
+    message:
+      status === 500 ? "An unexpected server error occurred." : error.message,
+    ...(error.details ? { details: error.details } : {}),
+    ...(typeof error.code === "string" &&
+    /^(?:AI_|AUTH_|BIOMETRIC_)/.test(error.code)
+      ? { code: error.code }
+      : {}),
+  });
 });
 module.exports = app;
