@@ -17,12 +17,12 @@
   },
   "name": "hcm-backend",
   "private": true,
-"scripts": {
-  "start": "node server.js",
-  "dev": "node --watch server.js",
-  "test": "node --test tests/*.test.js",
-  "setup:env": "node scripts/setup-env.js",
-  "setup:face": "bash scripts/setup-local-face.sh"
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test tests/*.test.js",
+    "setup:env": "node scripts/setup-env.js",
+    "setup:face": "bash scripts/setup-local-face.sh"
   },
   "engines": {
     "node": ">=24.5.0"
