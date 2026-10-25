@@ -130,6 +130,7 @@ test(
               ),
               role: "hr",
               password: temporary,
+              requirePasswordChange: true,
             },
             201,
           )
@@ -146,6 +147,7 @@ test(
               ),
               role: "employee",
               password: temporary,
+              requirePasswordChange: true,
             },
             201,
           )
@@ -162,6 +164,7 @@ test(
               ),
               role: "admin",
               password: temporary,
+              requirePasswordChange: true,
             },
             201,
           )
@@ -447,6 +450,7 @@ test(
         await admin(`/users/${employeeRecord.user._id}`, "PATCH", {
           active: true,
           password: temporary,
+          requirePasswordChange: true,
         });
         assert.equal(
           (

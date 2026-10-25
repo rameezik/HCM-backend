@@ -166,7 +166,12 @@ async function completeReset(token, password) {
       if (!claimed) throw invalid();
       const user = await M.User.findOneAndUpdate(
         { _id: reset.user, active: true, tokenVersion: reset.userTokenVersion },
-        { passwordHash, mustChangePassword: false, $inc: { tokenVersion: 1 } },
+        {
+          passwordHash,
+          mustChangePassword: false,
+          passwordChangeEnforced: false,
+          $inc: { tokenVersion: 1 },
+        },
         { returnDocument: "after", session, runValidators: true },
       );
       if (!user) throw invalid();

@@ -37,6 +37,7 @@ async function auth(req, res, next) {
     req.user = user;
     if (
       user.mustChangePassword &&
+      user.passwordChangeEnforced &&
       !["/auth/me", "/auth/password", "/auth/logout"].includes(req.path)
     )
       throw new ApiError(403, "Change your temporary password first.");

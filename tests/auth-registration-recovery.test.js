@@ -409,6 +409,7 @@ test(
               name: "Isolated HR activation",
               email: "activation@auth.example.test",
               password: temporaryPassword,
+              requirePasswordChange: true,
             },
             201,
           )

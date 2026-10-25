@@ -454,6 +454,11 @@ async function completeEnrollment(user, challengeId, samples) {
             ...filter,
             provider: provider.PROVIDER,
             status: "active",
+            // Private enrollment never opts a newly captured template into a public kiosk.
+            kioskEnabled: false,
+            kioskConsentAt: undefined,
+            kioskConsentVersion: undefined,
+            kioskPhotoUpdatedAt: undefined,
             modelVersion: extracted.modelVersion,
             protectedTemplate: protectTemplate(
               {

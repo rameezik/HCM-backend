@@ -55,10 +55,12 @@ function geofence(location, policy) {
 async function writeAttendance(
   user,
   action,
-  { session, verification = { method: "web" }, location } = {},
+  { session, verification = { method: "web" }, location, kioskDevice } = {},
 ) {
   if (!session) throw new E(500, "Attendance requires an atomic transaction.");
-  if (!["employee", "hr"].includes(user.role))
+  const pairedAdmin = user.role === "admin" && kioskDevice?.state === "paired" &&
+    String(kioskDevice.company) === String(user.company) && verification.method === "face";
+  if (!["employee", "hr"].includes(user.role) && !pairedAdmin)
     throw new E(
       403,
       "Only employee-linked users may record their own attendance.",

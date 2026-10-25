@@ -41,7 +41,11 @@ const userView = (user) => ({
   employee: user.employee,
   company: user.company,
   active: user.active,
-  mustChangePassword: user.mustChangePassword,
+  mustChangePassword: Boolean(
+    user.mustChangePassword && user.passwordChangeEnforced,
+  ),
+  passwordChangeRecommended: Boolean(user.mustChangePassword),
+  passwordChangeEnforced: Boolean(user.passwordChangeEnforced),
 });
 const cookieOptions = () => ({
   httpOnly: true,
@@ -186,8 +190,10 @@ router.post(
   }),
 );
 router.use("/auth", require("./publicAuthRoutes")({ companySchema, signIn }));
+router.use("/kiosk", require("./publicKioskRoutes"));
 router.use(auth);
-router.use(require('./employeePhotoRoutes'));
+router.use("/kiosk-management", require("./kioskManagementRoutes"));
+router.use(require("./employeePhotoRoutes"));
 router.get("/auth/me", (req, res) => res.json(userView(req.user)));
 router.post(
   "/auth/logout",
@@ -230,6 +236,7 @@ router.post(
       const before = userView(user);
       user.passwordHash = await bcrypt.hash(body.password, 12);
       user.mustChangePassword = false;
+      user.passwordChangeEnforced = false;
       user.tokenVersion++;
       await user.save({ session });
       await C.audit(
@@ -282,7 +289,8 @@ const catalogs = {
   ],
   holidays: [M.Holiday, z.object({ name: text, date }).strict()],
 };
-const accountProjection = "name email role active mustChangePassword";
+const accountProjection =
+  "name email role active mustChangePassword passwordChangeEnforced";
 async function lockAdminManagement(actor, session) {
   if (actor.role !== "admin") return;
   // Serialize privileged account changes per company, then recheck the actor.
@@ -474,6 +482,7 @@ router.post(
           employee: id.optional(),
           role: z.enum(["admin", "hr", "employee"]).default("hr"),
           active: z.boolean().default(true),
+          requirePasswordChange: z.boolean().default(false),
         })
         .strict(),
       req.body,
@@ -506,6 +515,7 @@ router.post(
             active: body.active,
             passwordHash: await bcrypt.hash(body.password, 12),
             mustChangePassword: true,
+            passwordChangeEnforced: body.requirePasswordChange,
             $inc: { tokenVersion: 1 },
           },
           { returnDocument: "after", session },
@@ -524,6 +534,7 @@ router.post(
               passwordHash: await bcrypt.hash(body.password, 12),
               role: body.role,
               active: body.active,
+              passwordChangeEnforced: body.requirePasswordChange,
             },
           ],
           { session },
@@ -552,6 +563,7 @@ router.patch(
           active: z.boolean().optional(),
           password: password.optional(),
           role: z.enum(["admin", "hr", "employee"]).optional(),
+          requirePasswordChange: z.boolean().optional(),
         })
         .strict(),
       req.body,
@@ -568,6 +580,10 @@ router.patch(
       if (body.password) {
         user.passwordHash = await bcrypt.hash(body.password, 12);
         user.mustChangePassword = true;
+        user.passwordChangeEnforced = body.requirePasswordChange ?? false;
+      } else if (body.requirePasswordChange !== undefined) {
+        user.passwordChangeEnforced = body.requirePasswordChange;
+        if (body.requirePasswordChange) user.mustChangePassword = true;
       }
       user.tokenVersion++;
       await user.save({ session });
@@ -635,6 +651,7 @@ async function createEmployee(
   actor,
   session,
   role = "employee",
+  requirePasswordChange = false,
 ) {
   if (actor.role !== "admin" && role !== "employee")
     throw new E(403, "Only Admin can assign HR or Admin roles.");
@@ -648,6 +665,7 @@ async function createEmployee(
         passwordHash: await bcrypt.hash(temporaryPassword, 12),
         role,
         active: body.status !== "exited",
+        passwordChangeEnforced: requirePasswordChange,
       },
     ],
     { session },
@@ -700,15 +718,24 @@ router.post(
     const {
       password: temporaryPassword,
       role: requestedRole = "employee",
+      requirePasswordChange = false,
       ...raw
     } = req.body;
     password.parse(temporaryPassword);
+    z.boolean().parse(requirePasswordChange);
     const role = z.enum(["admin", "hr", "employee"]).parse(requestedRole);
     if (req.user.role !== "admin" && role !== "employee")
       throw new E(403, "Only Admin can assign HR or Admin roles.");
     const body = employeeSchema.parse(raw);
     const doc = await C.transaction((session) =>
-      createEmployee(body, temporaryPassword, req.user, session, role),
+      createEmployee(
+        body,
+        temporaryPassword,
+        req.user,
+        session,
+        role,
+        requirePasswordChange,
+      ),
     );
     res.status(201).json(await employeeView(doc._id));
   }),
@@ -758,6 +785,7 @@ router.post(
         csv: z.string().min(1).max(500000),
         dryRun: z.boolean(),
         password: password.optional(),
+        requirePasswordChange: z.boolean().default(false),
       })
       .strict()
       .parse(req.body);
@@ -827,7 +855,14 @@ router.post(
     password.parse(body.password);
     await C.transaction(async (session) => {
       for (const row of parsed)
-        await createEmployee(row, body.password, req.user, session);
+        await createEmployee(
+          row,
+          body.password,
+          req.user,
+          session,
+          "employee",
+          body.requirePasswordChange,
+        );
     });
     res.status(201).json({ imported: parsed.length, errors: [] });
   }),

@@ -21,6 +21,7 @@ const User = model("User", {
   role: { type: String, enum: ["admin", "hr", "employee"], required: true },
   active: { type: Boolean, default: true },
   mustChangePassword: { type: Boolean, default: true },
+  passwordChangeEnforced: { type: Boolean, default: false },
   tokenVersion: { type: Number, default: 0 },
   employee: ref("Employee", false),
 });
@@ -81,6 +82,7 @@ const Employee = model("Employee", {
   address: String,
   photo: { type: Buffer, select: false },
   photoUpdatedAt: { type: Date, default: null },
+  kioskLastAttendanceAt: { type: Date, select: false },
 });
 const Attendance = model(
   "Attendance",
@@ -218,6 +220,10 @@ const BiometricEnrollment = model(
     expiresAt: { type: Date, index: true },
     lastVerifiedAt: Date,
     deleteRequestedAt: Date,
+    kioskEnabled: { type: Boolean, default: false },
+    kioskConsentAt: Date,
+    kioskConsentVersion: String,
+    kioskPhotoUpdatedAt: Date,
   },
   [[{ company: 1, employee: 1 }, { unique: true }]],
 );
@@ -257,7 +263,48 @@ const BiometricChallenge = model(
     ],
   ],
 );
+const KioskDevice = model("KioskDevice", {
+  label: { type: String, required: true },
+  state: { type: String, enum: ["pending", "paired", "revoked"], default: "pending" },
+  office: new Schema({ latitude: Number, longitude: Number }, { _id: false }),
+  createdBy: ref("User"),
+  tokenVersion: { type: Number, default: 0 },
+  pairingTokenHash: { type: String, select: false },
+  pairingExpiresAt: Date,
+  credentialHash: { type: String, select: false },
+  credentialExpiresAt: Date,
+  pairedAt: Date,
+  revokedAt: Date,
+}, [[{ pairingTokenHash: 1 }, { unique: true, sparse: true }]]);
+const KioskChallenge = model("KioskChallenge", {
+  device: ref("KioskDevice"),
+  purpose: { type: String, enum: ["enroll", "check-in", "check-out"], required: true },
+  state: { type: String, enum: ["created", "verifying", "completed", "failed"], default: "created" },
+  attempts: { type: Number, default: 0 },
+  expiresAt: Date,
+  consumedAt: Date,
+  failureCode: String,
+  employee: ref("Employee", false),
+}, [[{ expiresAt: 1 }, { expireAfterSeconds: 86400 }], [{ company: 1, device: 1, createdAt: -1 }, {}]]);
+const KioskEnrollmentGrant = model("KioskEnrollmentGrant", {
+  employee: ref("Employee"),
+  user: ref("User"),
+  issuedBy: ref("User"),
+  codeHash: { type: String, required: true, select: false },
+  userTokenVersion: { type: Number, required: true },
+  photoUpdatedAt: { type: Date, required: true },
+  state: { type: String, enum: ["issued", "verifying", "consumed", "failed", "revoked"], default: "issued" },
+  attempts: { type: Number, default: 0 },
+  device: ref("KioskDevice", false),
+  claimedAt: Date,
+  expiresAt: Date,
+  consumedAt: Date,
+  failureCode: String,
+}, [[{ codeHash: 1 }, { unique: true }], [{ expiresAt: 1 }, { expireAfterSeconds: 86400 }]]);
 module.exports = {
+  KioskDevice,
+  KioskChallenge,
+  KioskEnrollmentGrant,
   PasswordResetToken,
   BiometricEnrollment,
   BiometricChallenge,

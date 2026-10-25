@@ -209,6 +209,11 @@ test('real local SFace inference drives isolated encrypted enrollment and attend
     const session = await challenge(employee, 'enroll');
     const result = await request(employee, '/biometrics/enrollment', 'POST', { challengeId: session.challengeId, samples: matching }, 201);
     assert.equal(result.enrollment.enrolled, true);
+    const privateEnrollment = await M.BiometricEnrollment.findOne({ company: employee.company, employee: employee.employee }).lean();
+    assert.equal(privateEnrollment.kioskEnabled, false);
+    assert.equal(privateEnrollment.kioskConsentAt, undefined);
+    assert.equal(privateEnrollment.kioskConsentVersion, undefined);
+    assert.equal(privateEnrollment.kioskPhotoUpdatedAt, undefined);
     assert.ok(await M.AuditLog.exists({ company: employee.company, actor: employee._id, action: 'biometric_enrolled' }));
     const auditText = JSON.stringify(await M.AuditLog.find({ company: employee.company }).lean());
     assert.equal(auditText.includes(matching[0].slice(0, 120)), false);

@@ -120,7 +120,12 @@ test("real MongoDB API lifecycle and role boundaries", async (t) => {
     await admin(
       "/users",
       "POST",
-      { name: "HR Person", email: "hr@example.test", password: passwd },
+      {
+        name: "HR Person",
+        email: "hr@example.test",
+        password: passwd,
+        requirePasswordChange: true,
+      },
       201,
     );
   });
@@ -373,7 +378,12 @@ test("real MongoDB API lifecycle and role boundaries", async (t) => {
           await hr(
             "/employees/import",
             "POST",
-            { csv, dryRun: false, password: passwd },
+            {
+              csv,
+              dryRun: false,
+              password: passwd,
+              requirePasswordChange: true,
+            },
             201,
           )
         ).imported,
@@ -564,11 +574,15 @@ test("real MongoDB API lifecycle and role boundaries", async (t) => {
   await t.test(
     "missing AI configuration fails honestly, logs calls, and normal services remain usable",
     async () => {
-        const availability = await alice('/ai/status');
-      assert.equal(availability.configured,false);
-      assert.equal(availability.code,'AI_NOT_CONFIGURED');
-      assert.deepEqual(availability.features,{chat:false,summary:false,smartLeave:false});
-    const saved = process.env.AI_API_KEY;
+      const availability = await alice("/ai/status");
+      assert.equal(availability.configured, false);
+      assert.equal(availability.code, "AI_NOT_CONFIGURED");
+      assert.deepEqual(availability.features, {
+        chat: false,
+        summary: false,
+        smartLeave: false,
+      });
+      const saved = process.env.AI_API_KEY;
       delete process.env.AI_API_KEY;
       try {
         const unavailable = await alice(
@@ -577,7 +591,7 @@ test("real MongoDB API lifecycle and role boundaries", async (t) => {
           { message: "What is my sick leave balance?" },
           503,
         );
-        assert.equal(unavailable.code, 'AI_NOT_CONFIGURED');
+        assert.equal(unavailable.code, "AI_NOT_CONFIGURED");
         assert.equal(
           await M.AiLog.countDocuments({ actor: aliceRecord.user }),
           1,
@@ -591,7 +605,9 @@ test("real MongoDB API lifecycle and role boundaries", async (t) => {
   await t.test(
     "deactivation revokes sessions and logout invalidates JWT",
     async () => {
-      await admin(`/users/${bobRecord.user?._id || bobRecord.user}`, "PATCH", { active: false });
+      await admin(`/users/${bobRecord.user?._id || bobRecord.user}`, "PATCH", {
+        active: false,
+      });
       await bob("/auth/me", "GET", undefined, 401);
       await alice("/auth/logout", "POST");
       await alice("/auth/me", "GET", undefined, 401);
