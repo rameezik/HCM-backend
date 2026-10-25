@@ -187,6 +187,7 @@ router.post(
 );
 router.use("/auth", require("./publicAuthRoutes")({ companySchema, signIn }));
 router.use(auth);
+router.use(require('./employeePhotoRoutes'));
 router.get("/auth/me", (req, res) => res.json(userView(req.user)));
 router.post(
   "/auth/logout",

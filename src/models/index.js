@@ -79,6 +79,8 @@ const Employee = model("Employee", {
   basic: { type: Number, required: true, min: 0 },
   phone: String,
   address: String,
+  photo: { type: Buffer, select: false },
+  photoUpdatedAt: { type: Date, default: null },
 });
 const Attendance = model(
   "Attendance",
