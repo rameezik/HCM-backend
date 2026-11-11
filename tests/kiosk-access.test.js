@@ -177,10 +177,10 @@ test(
         });
         paired = response.data.device;
         assert.equal(response.data.companyName, company.name);
-        assert.match(response.headers.get("set-cookie"), /hcm_kiosk=/);
+        assert.match(response.headers.get("set-cookie"), /hcm_attendance_terminal=/);
         assert.match(response.headers.get("set-cookie"), /HttpOnly/);
         assert.match(response.headers.get("set-cookie"), /SameSite=Strict/);
-        assert.match(response.headers.get("set-cookie"), /Path=\/api\/kiosk/);
+        assert.match(response.headers.get("set-cookie"), /Path=\/api/);
         assert.equal(kiosk.cookie().includes("hcm_session"), false);
         await kioskTwo(
           "/kiosk/pair",

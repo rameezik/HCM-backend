@@ -1,4 +1,6 @@
-# Public attendance kiosk
+# Public attendance kiosk (previous workflow)
+
+The current name is **Attendance Terminal**. Use the [current installation and photo-based setup guide](attendance-terminal.md). The legacy API routes below remain compatible; new employee setup no longer needs a public enrollment code.
 
 The public `/attendance-kiosk` screen in the frontend uses dedicated company-paired device access. Employees do not sign in to scan. A kiosk credential authorizes only kiosk operations; it cannot authenticate `/auth/me`, employee profiles, payroll or other portal APIs.
 

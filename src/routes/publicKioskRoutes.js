@@ -23,17 +23,13 @@ const samples = z
 router.use((req, res, next) => {
   res.set("Cache-Control", "no-store");
   if (process.env.NODE_ENV === "production" && !req.secure)
-    return next(
-      new ApiError(
-        400,
-        "Attendance kiosks require HTTPS through the configured trusted proxy.",
-      ),
-    );
+    return next(new ApiError(400, "Attendance Terminal requires HTTPS."));
   next();
 });
 const pairLimit = rateLimit({
   windowMs: 15 * 60000,
   limit: 15,
+  skipSuccessfulRequests: true,
   standardHeaders: "draft-8",
   legacyHeaders: false,
   message: {
@@ -47,7 +43,7 @@ const deviceLimit = rateLimit({
   keyGenerator: (req) => String(req.kioskDevice._id),
   standardHeaders: "draft-8",
   legacyHeaders: false,
-  message: { message: "This kiosk is scanning too quickly. Wait one minute." },
+  message: { message: "Too many scans. Wait one minute." },
 });
 router.get(
   "/status",
@@ -62,12 +58,34 @@ router.get(
   }),
 );
 router.post(
+  "/connect",
+  pairLimit,
+  wrap(async (req, res) => {
+    const body = z
+      .object({
+        accessToken: z
+          .string()
+          .regex(
+            /^[a-f\d]{24}\.\d{1,10}\.[a-f\d]{64}$/i,
+            "Use the attendance link supplied by Admin",
+          ),
+      })
+      .strict()
+      .parse(req.body);
+    res.json(await access.connectDevice(body.accessToken, res));
+  }),
+);
+router.post(
   "/pair",
   pairLimit,
   wrap(async (req, res) => {
     const body = z.object({ pairingToken: code }).strict().parse(req.body);
     res.json(await access.pairDevice(body.pairingToken, res));
   }),
+);
+router.post(
+  "/disconnect",
+  wrap(async (req, res) => res.json(access.disconnectDevice(res))),
 );
 router.post(
   "/unpair",

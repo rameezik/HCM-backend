@@ -259,13 +259,13 @@ test(
           pairingToken: created.pairingToken,
         });
         assert.equal(paired.paired, true);
-        assert.deepEqual([...kiosk.cookies.keys()], ["hcm_kiosk"]);
+        assert.deepEqual([...kiosk.cookies.keys()], ["hcm_attendance_terminal"]);
         assert.ok(
           kiosk.responseCookies.some(
             (cookie) =>
-              /^hcm_kiosk=/.test(cookie) &&
+              /^hcm_attendance_terminal=/.test(cookie) &&
               /HttpOnly/i.test(cookie) &&
-              /Path=\/api\/kiosk(?:;|$)/i.test(cookie) &&
+              /Path=\/api(?:;|$)/i.test(cookie) &&
               /Max-Age=604800/i.test(cookie),
           ),
         );
@@ -314,7 +314,7 @@ test(
         const result = await scan("check-in");
         assert.equal(result.matched, false);
         assert.equal(result.code, "UNREGISTERED_PROFILE");
-        assert.equal(result.message, "Unregistered profile");
+        assert.equal(result.message, "Record not found");
         assert.equal(await M.Attendance.countDocuments(), 0);
         assert.equal(await M.User.countDocuments(), originalUserCount);
         assert.equal(await M.Employee.countDocuments(), originalEmployeeCount);
@@ -391,7 +391,7 @@ test(
           JSON.stringify(result).includes("protectedTemplate"),
           false,
         );
-        assert.deepEqual([...kiosk.cookies.keys()], ["hcm_kiosk"]);
+        assert.deepEqual([...kiosk.cookies.keys()], ["hcm_attendance_terminal"]);
         await kiosk.request("/auth/me", "GET", undefined, 401);
       },
     );
@@ -402,7 +402,7 @@ test(
         const result = await scan("check-in", otherSamples);
         assert.equal(result.matched, false);
         assert.equal(result.code, "UNREGISTERED_PROFILE");
-        assert.equal(result.message, "Unregistered profile");
+        assert.equal(result.message, "Record not found");
         assert.equal(result.employee, undefined);
         assert.equal(await M.Attendance.countDocuments(), 0);
       },
@@ -433,7 +433,7 @@ test(
           ),
           true,
         );
-        assert.deepEqual([...kiosk.cookies.keys()], ["hcm_kiosk"]);
+        assert.deepEqual([...kiosk.cookies.keys()], ["hcm_attendance_terminal"]);
         await kiosk.request("/auth/me", "GET", undefined, 401);
       },
     );
@@ -538,12 +538,12 @@ test(
           samples,
         });
         assert.equal(result.matched, false);
-        assert.equal(result.message, "Unregistered profile");
+        assert.equal(result.message, "Record not found");
         assert.equal(
           await M.Attendance.countDocuments({ company: foreignCompany._id }),
           0,
         );
-        assert.deepEqual([...foreignKiosk.cookies.keys()], ["hcm_kiosk"]);
+        assert.deepEqual([...foreignKiosk.cookies.keys()], ["hcm_attendance_terminal"]);
       },
     );
 

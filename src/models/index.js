@@ -224,6 +224,9 @@ const BiometricEnrollment = model(
     kioskConsentAt: Date,
     kioskConsentVersion: String,
     kioskPhotoUpdatedAt: Date,
+    terminalEnrollmentSource: { type: String, enum: ["profile-photo", "camera"] },
+    terminalConsentVersion: String,
+    terminalConsentRecordedBy: ref("User", false),
   },
   [[{ company: 1, employee: 1 }, { unique: true }]],
 );
@@ -265,6 +268,7 @@ const BiometricChallenge = model(
 );
 const KioskDevice = model("KioskDevice", {
   label: { type: String, required: true },
+  reusable: { type: Boolean, default: false },
   state: { type: String, enum: ["pending", "paired", "revoked"], default: "pending" },
   office: new Schema({ latitude: Number, longitude: Number }, { _id: false }),
   createdBy: ref("User"),

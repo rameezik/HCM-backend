@@ -3,7 +3,8 @@ const M = require("../models");
 const C = require("./context");
 const ApiError = require("../utils/ApiError");
 const { withCompany } = require("./companyContext");
-const COOKIE = "hcm_kiosk";
+const COOKIE = "hcm_attendance_terminal";
+const LEGACY_COOKIE = "hcm_kiosk";
 const PAIR_LIFETIME = 10 * 60000;
 const DEVICE_LIFETIME = 7 * 86400000;
 const GRANT_LIFETIME = 15 * 60000;
@@ -13,13 +14,14 @@ const cookieOptions = () => ({
   httpOnly: true,
   secure: process.env.NODE_ENV === "production",
   sameSite: "strict",
-  path: "/api/kiosk",
+  path: "/api",
   maxAge: DEVICE_LIFETIME,
 });
 const deviceView = (row) => ({
   _id: row._id,
   id: row._id,
   label: row.label,
+  reusable: Boolean(row.reusable),
   state: row.state,
   office: row.office,
   pairingExpiresAt: row.pairingExpiresAt,
@@ -39,7 +41,7 @@ async function adminActor(user, session) {
   if (user?.role !== "admin" || !user.company)
     throw new ApiError(
       403,
-      "Only the company Admin can manage attendance kiosks.",
+      "Only the company Admin can manage attendance terminals.",
     );
   const actor = await M.User.findOneAndUpdate(
     {
@@ -63,16 +65,18 @@ async function audit(session, user, action, entity, details) {
 }
 async function listDevices(user) {
   if (user?.role !== "admin")
-    throw new ApiError(403, "Only Admin can list attendance kiosks.");
+    throw new ApiError(403, "Only Admin can list attendance terminals.");
   return (
     await M.KioskDevice.find({ company: user.company })
       .sort({ createdAt: -1 })
       .lean()
   ).map(deviceView);
 }
-async function createDevice(user, label) {
+async function createDevice(user, label, { reusable = false } = {}) {
   const pairingToken = token(),
     expiresAt = new Date(Date.now() + PAIR_LIFETIME);
+  const credential = reusable ? token() : null;
+  const credentialExpiresAt = new Date(Date.now() + DEVICE_LIFETIME);
   const row = await C.transaction(async (session) => {
     await adminActor(user, session);
     const company = await M.Company.findOne({ _id: user.company })
@@ -85,13 +89,14 @@ async function createDevice(user, label) {
     )
       throw new ApiError(
         422,
-        "Configure the company office latitude and longitude before pairing an attendance kiosk.",
+        "Configure the company office latitude and longitude before pairing an attendance terminal.",
       );
     const [device] = await M.KioskDevice.create(
       [
         {
           company: user.company,
           label,
+          reusable,
           createdBy: user._id,
           office: { latitude: company.latitude, longitude: company.longitude },
           pairingTokenHash: hash(pairingToken),
@@ -100,6 +105,16 @@ async function createDevice(user, label) {
       ],
       { session },
     );
+    if (reusable) {
+      device.state = "paired";
+      device.tokenVersion = 1;
+      device.credentialHash = hash(credential);
+      device.credentialExpiresAt = credentialExpiresAt;
+      device.pairedAt = new Date();
+      device.pairingTokenHash = undefined;
+      device.pairingExpiresAt = undefined;
+      await device.save({ session });
+    }
     await audit(session, user, "kiosk_device_created", "KioskDevice", {
       _id: device._id,
       label,
@@ -108,7 +123,13 @@ async function createDevice(user, label) {
     });
     return device;
   });
-  return { device: deviceView(row), pairingToken, expiresAt };
+  return reusable
+    ? {
+        device: deviceView(row),
+        accessToken: `${row._id}.${row.tokenVersion}.${credential}`,
+        expiresAt: credentialExpiresAt,
+      }
+    : { device: deviceView(row), pairingToken, expiresAt };
 }
 async function revokeDevice(user, id) {
   await C.transaction(async (session) => {
@@ -123,7 +144,7 @@ async function revokeDevice(user, id) {
       },
       { session, returnDocument: "after" },
     );
-    if (!row) throw new ApiError(404, "Kiosk device not found.");
+    if (!row) throw new ApiError(404, "Attendance terminal not found.");
     await M.KioskChallenge.updateMany(
       {
         company: user.company,
@@ -164,17 +185,22 @@ async function pairDevice(pairingToken, res) {
   if (!device)
     throw new ApiError(
       422,
-      "This kiosk pairing code is invalid, expired or already used. Ask Admin for a new code.",
+      "This terminal connection code is invalid, expired or already used. Ask Admin for a new code.",
     );
   const company = await M.Company.findOne({ _id: device.company })
     .select("name")
     .lean();
-  if (!company) throw new ApiError(403, "This kiosk company is unavailable.");
+  if (!company) throw new ApiError(403, "This company is unavailable.");
   res.cookie(
     COOKIE,
     `${device._id}.${device.tokenVersion}.${credential}`,
     cookieOptions(),
   );
+  res.clearCookie(LEGACY_COOKIE, {
+    ...cookieOptions(),
+    path: "/api/kiosk",
+    maxAge: undefined,
+  });
   await withCompany(device.company, () =>
     audit(
       null,
@@ -192,7 +218,7 @@ async function pairDevice(pairingToken, res) {
 }
 async function deviceFromRequest(req, { required = true } = {}) {
   const match = /^([a-f\d]{24})\.(\d{1,10})\.([a-f\d]{64})$/i.exec(
-    req.cookies?.[COOKIE] || "",
+    req.cookies?.[COOKIE] || req.cookies?.[LEGACY_COOKIE] || "",
   );
   let row;
   if (match)
@@ -208,7 +234,7 @@ async function deviceFromRequest(req, { required = true } = {}) {
     if (!required) return null;
     throw new ApiError(
       401,
-      "Pair this kiosk with a company Admin code before scanning.",
+      "Connect this terminal with a company Admin code before scanning.",
     );
   }
   const company = await M.Company.findOne({ _id: row.company })
@@ -216,18 +242,59 @@ async function deviceFromRequest(req, { required = true } = {}) {
     .lean();
   if (!company) {
     if (!required) return null;
-    throw new ApiError(401, "This kiosk company is unavailable.");
+    throw new ApiError(401, "This company is unavailable.");
   }
   return {
     _id: row._id,
     company: row.company,
     companyName: company.name,
     label: row.label,
+    reusable: Boolean(row.reusable),
     office: row.office,
     state: row.state,
     tokenVersion: row.tokenVersion,
     credentialExpiresAt: row.credentialExpiresAt,
   };
+}
+async function connectDevice(accessToken, res) {
+  const device = await deviceFromRequest({
+    cookies: { [COOKIE]: accessToken },
+  });
+  res.cookie(COOKIE, accessToken, {
+    ...cookieOptions(),
+    maxAge: Math.max(
+      0,
+      new Date(device.credentialExpiresAt).getTime() - Date.now(),
+    ),
+  });
+  res.clearCookie(LEGACY_COOKIE, {
+    ...cookieOptions(),
+    path: "/api/kiosk",
+    maxAge: undefined,
+  });
+  await withCompany(device.company, () =>
+    audit(
+      null,
+      { company: device.company },
+      "terminal_connected",
+      "KioskDevice",
+      { _id: device._id, label: device.label },
+    ),
+  );
+  return {
+    paired: true,
+    device: deviceView(device),
+    companyName: device.companyName,
+  };
+}
+function disconnectDevice(res) {
+  res.clearCookie(COOKIE, { ...cookieOptions(), maxAge: undefined });
+  res.clearCookie(LEGACY_COOKIE, {
+    ...cookieOptions(),
+    path: "/api/kiosk",
+    maxAge: undefined,
+  });
+  return { paired: false };
 }
 async function lockDevice(device, session) {
   const row = await M.KioskDevice.findOneAndUpdate(
@@ -244,11 +311,12 @@ async function lockDevice(device, session) {
   if (!row)
     throw new ApiError(
       401,
-      "This kiosk pairing expired or was revoked. Ask Admin to pair it again.",
+      "This terminal connection expired or was revoked. Ask Admin to pair it again.",
     );
   return row;
 }
 async function unpairDevice(device, res) {
+  if (device?.reusable) return disconnectDevice(res);
   if (device)
     await withCompany(device.company, () =>
       C.transaction(async (session) => {
@@ -292,6 +360,11 @@ async function unpairDevice(device, res) {
       }),
     );
   res.clearCookie(COOKIE, { ...cookieOptions(), maxAge: undefined });
+  res.clearCookie(LEGACY_COOKIE, {
+    ...cookieOptions(),
+    path: "/api/kiosk",
+    maxAge: undefined,
+  });
   return { paired: false };
 }
 async function createEnrollmentGrant(user, employeeId) {
@@ -399,7 +472,7 @@ async function claimChallenge(device, id, purpose, session) {
   if (!row)
     throw new ApiError(
       409,
-      "This camera challenge expired, was already used or belongs to another kiosk. Start a new scan.",
+      "This camera challenge expired, was already used or belongs to another terminal. Start a new scan.",
     );
   return row;
 }
@@ -454,7 +527,7 @@ async function claimEnrollmentGrant(device, code, session) {
   if (!row)
     throw new ApiError(
       422,
-      "This enrollment code is invalid, expired, already used or belongs to another kiosk. Ask Admin for access.",
+      "This enrollment code is invalid, expired, already used or belongs to another terminal. Ask Admin for access.",
     );
   return row;
 }
@@ -506,6 +579,8 @@ module.exports = {
   createDevice,
   revokeDevice,
   pairDevice,
+  connectDevice,
+  disconnectDevice,
   deviceFromRequest,
   unpairDevice,
   lockDevice,

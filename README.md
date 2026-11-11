@@ -1,5 +1,11 @@
 # HCM Lite Backend
 
+## Attendance Terminal
+
+Admin can enable face attendance from an employee's saved profile photo after recording permission. Employees then use a company terminal link without signing in. The server performs local YuNet/SFace matching and records attendance in MongoDB; unmatched scans return **Record not found**.
+
+See [installation, configuration and usage](docs/attendance-terminal.md). The frontend pages are `/admin/attendance-terminal` for setup and `/attendance-terminal` for scanning.
+
 ### Human Capital Management System — REST API
 
 HCM Lite Backend is a RESTful API built with Node.js, Express.js, MongoDB, and Mongoose. It powers the HCM Lite application by providing authentication, employee management, department management, attendance tracking, leave management, payroll processing, and workforce analytics.

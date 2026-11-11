@@ -190,9 +190,9 @@ router.post(
   }),
 );
 router.use("/auth", require("./publicAuthRoutes")({ companySchema, signIn }));
-router.use("/kiosk", require("./publicKioskRoutes"));
+router.use(["/attendance-terminal", "/kiosk"], require("./publicKioskRoutes"));
 router.use(auth);
-router.use("/kiosk-management", require("./kioskManagementRoutes"));
+router.use(["/attendance-terminal-management", "/kiosk-management"], require("./kioskManagementRoutes"));
 router.use(require("./employeePhotoRoutes"));
 router.get("/auth/me", (req, res) => res.json(userView(req.user)));
 router.post(

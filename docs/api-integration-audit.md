@@ -118,7 +118,7 @@ Employee removal is represented by the existing audited exit/deactivation workfl
 
 ## Non-endpoint pages and boundaries
 
-`/attendance-kiosk` redirects to login; it is not an anonymous face-attendance API. The unmounted `FaceScanner`/camera-preview components do not submit attendance and are not evidence of identity verification. Active face enrollment and attendance use `LocalFaceCapture` and the authenticated `/biometrics` flow described above.
+`/attendance-terminal` supports face attendance without an employee session after company terminal connection. Admin enables matching from an employee's saved photo after recording permission. The backend performs local inference and writes actual attendance; see [Attendance Terminal](attendance-terminal.md). The old `/attendance-kiosk` URL redirects to the terminal. Authenticated self-service `/biometrics` routes remain available.
 
 The active frontend is `HCM-frontend`; `hcm-app` is a preserved earlier checkout. This audit does not silently change saved repository selection or treat that historical checkout as the app being tested.
 
