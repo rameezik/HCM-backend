@@ -7,11 +7,11 @@ function readEncryptionKey() {
   if (
     !/^[A-Za-z\d+/]{43}=$/.test(raw) ||
     Buffer.from(raw, "base64").length !== 32
-  )
-    throw new ApiError(
-      503,
-      "Local biometric encryption is not configured. Run npm run setup:env for development or configure BIOMETRIC_TEMPLATE_KEY securely on the backend.",
-    );
+  ) {
+    const error = new ApiError(503, "Biometric encryption is not configured.");
+    error.code = "BIOMETRIC_NOT_CONFIGURED";
+    throw error;
+  }
   return Buffer.from(raw, "base64");
 }
 const templateContext = (company, employee) =>
@@ -51,12 +51,18 @@ function revealTemplate(protectedTemplate, company, employee) {
   const key = readEncryptionKey();
   let plaintext;
   try {
+    if (!protectedTemplate) throw Error("Missing template");
     if (
-      !protectedTemplate ||
       protectedTemplate.keyVersion !==
-        (process.env.BIOMETRIC_TEMPLATE_KEY_ID || "v1")
-    )
-      throw Error("Key version mismatch");
+      (process.env.BIOMETRIC_TEMPLATE_KEY_ID || "v1")
+    ) {
+      const error = new ApiError(
+        503,
+        "The original biometric key version is required to read existing enrollments.",
+      );
+      error.code = "BIOMETRIC_KEY_VERSION_MISMATCH";
+      throw error;
+    }
     const decipher = crypto.createDecipheriv(
       "aes-256-gcm",
       key,
@@ -76,11 +82,14 @@ function revealTemplate(protectedTemplate, company, employee) {
     )
       throw Error("Invalid template");
     return template;
-  } catch {
-    throw new ApiError(
+  } catch (cause) {
+    if (cause.code === "BIOMETRIC_KEY_VERSION_MISMATCH") throw cause;
+    const error = new ApiError(
       503,
-      "Your encrypted face template cannot be read. Contact Admin; preserve the original biometric encryption key.",
+      "An existing face enrollment cannot be read. Restore the original biometric encryption key.",
     );
+    error.code = "BIOMETRIC_TEMPLATE_UNREADABLE";
+    throw error;
   } finally {
     key.fill(0);
     plaintext?.fill(0);

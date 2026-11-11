@@ -10,6 +10,8 @@ The fix resolves Python commands through `PATH`, resolves relative files against
 
 The runtime check does not bypass the encryption key, consent, employee photo, account, company or attendance checks. The exact deployed failing gate is shown by `missingConfiguration`; do not infer it from the build log alone.
 
+If readiness passes but enrollment returns `503` after the encryption key was changed, follow [restore the original biometric key](restore-biometric-key.md). A new key can pass the format check while being unable to read existing templates.
+
 ## Existing native Node service on Render
 
 Keep the current service and URL. Use the backend repository’s `main` branch and leave **Root Directory** empty unless the repository was deliberately nested.

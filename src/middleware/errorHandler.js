@@ -8,6 +8,10 @@ function publicServerMessage(error, status) {
       "AI features are unavailable. Please contact your administrator.",
     BIOMETRIC_NOT_CONFIGURED:
       "Face attendance is unavailable. Please contact your administrator.",
+    BIOMETRIC_TEMPLATE_UNREADABLE:
+      "An existing face enrollment cannot be read. Please contact your administrator.",
+    BIOMETRIC_KEY_VERSION_MISMATCH:
+      "An existing face enrollment uses a different key version. Please contact your administrator.",
   };
   if (Object.hasOwn(featureMessages, error.code))
     return featureMessages[error.code];
