@@ -1,4 +1,3 @@
-
 const { loadEnvironment } = require("./src/config/environment");
 const mongoose = require("mongoose");
 const dns = require("node:dns");
@@ -10,31 +9,21 @@ async function start() {
   // Load environment variables
   loadEnvironment();
 
-  // Connect to MongoDB
-  console.log("Connecting to MongoDB...");
-
   await require("./src/config/db")();
 
   // Verify MongoDB connection
   const dbState = mongoose.connection.readyState;
 
-  console.log("MongoDB state:", dbState);
-
   if (dbState !== 1) {
-    throw new Error(
-      "MongoDB is not connected. Current state: " + dbState
-    );
+    throw new Error("MongoDB is not connected. Current state: " + dbState);
   }
-
-  console.log("MongoDB connected successfully");
 
   // Initialize Express application
   const app = require("./src/app");
 
   // Start biometric retention service
   const stopRetention =
-    require("./src/services/biometricRetention")
-      .startBiometricRetention();
+    require("./src/services/biometricRetention").startBiometricRetention();
 
   // Server configuration
   const PORT = Number(process.env.PORT || 4000);
@@ -42,6 +31,19 @@ async function start() {
   // Start HTTP server
   const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`HCM API listening on port ${PORT}`);
+    require("./src/services/kioskRecognitionService")
+      .readiness()
+      .then(({ configured, missing, runtime }) => {
+        console.log(
+          "Face attendance readiness:",
+          JSON.stringify({
+            configured,
+            missingConfiguration: missing,
+            runtimeReady: runtime?.ready === true,
+          }),
+        );
+      })
+      .catch(() => console.error("Face attendance readiness check failed."));
   });
 
   // Graceful shutdown

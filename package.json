@@ -23,6 +23,7 @@
     "dev": "node --watch server.js",
     "test": "node --test tests/*.test.js",
     "setup:env": "node scripts/setup-env.js",
+    "check:face": "node scripts/check-local-face.js",
     "setup:face": "bash scripts/setup-local-face.sh"
   },
   "engines": {

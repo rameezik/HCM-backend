@@ -15,7 +15,8 @@ import numpy as np
 
 cv2.setNumThreads(1)
 ROOT = Path(__file__).resolve().parents[2]
-MODEL_DIR = Path(os.environ.get("BIOMETRIC_MODEL_DIR") or ROOT / "models/local-face").resolve()
+configured_model_dir = Path(os.environ.get("BIOMETRIC_MODEL_DIR", "").strip() or "models/local-face")
+MODEL_DIR = (ROOT / configured_model_dir).resolve()
 MODEL_VERSION = "opencv-sface-2021dec-yunet-2023mar-v1"
 
 

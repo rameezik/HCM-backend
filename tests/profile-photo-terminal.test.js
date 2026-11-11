@@ -290,6 +290,83 @@ test(
     );
 
     await t.test(
+      "Admin readiness checks encryption configuration separately from installed models",
+      async () => {
+        const originalKey = process.env.BIOMETRIC_TEMPLATE_KEY;
+        try {
+          process.env.BIOMETRIC_TEMPLATE_KEY = crypto
+            .randomBytes(32)
+            .toString("hex");
+          const unavailable = await admin.request(`${management}/employees`);
+          assert.equal(unavailable.configured, false);
+          assert.ok(
+            unavailable.missingConfiguration.includes("BIOMETRIC_TEMPLATE_KEY"),
+          );
+          assert.equal(unavailable.runtime.ready, true);
+          assert.equal(
+            JSON.stringify(unavailable).includes(
+              process.env.BIOMETRIC_TEMPLATE_KEY,
+            ),
+            false,
+          );
+          process.env.BIOMETRIC_TEMPLATE_KEY = ` ${originalKey}\n`;
+          const ready = await admin.request(`${management}/employees`);
+          assert.equal(ready.configured, true);
+          assert.deepEqual(ready.missingConfiguration, []);
+        } finally {
+          process.env.BIOMETRIC_TEMPLATE_KEY = originalKey;
+        }
+      },
+    );
+
+    await t.test(
+      "Admin readiness rejects a selected Python runtime without OpenCV despite installed model files",
+      async () => {
+        const { spawnSync } = require("node:child_process");
+        const runtimeDirectory = fs.mkdtempSync(
+          path.join(require("node:os").tmpdir(), "hcm-admin-runtime-"),
+        );
+        const originalPython = process.env.BIOMETRIC_PYTHON_PATH;
+        try {
+          const created = spawnSync(
+            provider.configuration().pythonPath,
+            ["-m", "venv", "--without-pip", runtimeDirectory],
+            { encoding: "utf8" },
+          );
+          assert.equal(
+            created.status,
+            0,
+            "The isolated Python runtime must be created successfully.",
+          );
+          process.env.BIOMETRIC_PYTHON_PATH = path.join(
+            runtimeDirectory,
+            process.platform === "win32" ? "Scripts/python.exe" : "bin/python",
+          );
+          assert.equal(
+            provider.configuration().configured,
+            true,
+            "Static file checks alone cannot prove that OpenCV is installed.",
+          );
+          const unavailable = await admin.request(`${management}/employees`);
+          assert.equal(unavailable.configured, false);
+          assert.ok(
+            unavailable.missingConfiguration.includes("BIOMETRIC_RUNTIME"),
+          );
+          assert.equal(unavailable.runtime.ready, false);
+        } finally {
+          if (originalPython === undefined)
+            delete process.env.BIOMETRIC_PYTHON_PATH;
+          else process.env.BIOMETRIC_PYTHON_PATH = originalPython;
+          fs.rmSync(runtimeDirectory, { recursive: true, force: true });
+        }
+        assert.equal(
+          (await admin.request(`${management}/employees`)).configured,
+          true,
+        );
+      },
+    );
+
+    await t.test(
       "a profile photo requires explicit consent before real inference enables attendance",
       async () => {
         await upload(target.row._id, samples[0]);

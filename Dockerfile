@@ -17,6 +17,9 @@ RUN --mount=type=secret,id=hcm_build_ca \
 
 COPY scripts/local-face/ ./scripts/local-face/
 COPY scripts/setup-local-face.sh ./scripts/setup-local-face.sh
+COPY scripts/check-local-face.js ./scripts/check-local-face.js
+COPY src/services/localFaceProvider.js ./src/services/localFaceProvider.js
+COPY src/utils/ApiError.js ./src/utils/ApiError.js
 # Install dependencies, verify both official model SHA-256 hashes, and load the
 # actual detection and embedding models during the build. No credentials needed.
 RUN --mount=type=secret,id=hcm_build_ca \
@@ -31,5 +34,6 @@ ENV NODE_ENV=production \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 USER node
+RUN npm run check:face -- --runtime-only
 EXPOSE 4000
 CMD ["node", "--use-env-proxy", "server.js"]

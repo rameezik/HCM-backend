@@ -75,7 +75,7 @@ function requireConfiguration() {
   return config;
 }
 async function status(user) {
-  const config = faceProvider.configuration();
+  const config = await faceProvider.readiness();
   const missing = [...(config.missing || [])];
   try {
     readEncryptionKey().fill(0);

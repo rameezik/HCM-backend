@@ -110,7 +110,7 @@ async function listEmployees(user, { search = "", page = 1, limit = 50 } = {}) {
   const enrollmentByEmployee = new Map(
     enrollments.map((enrollment) => [String(enrollment.employee), enrollment]),
   );
-  const readiness = terminalRecognition.configuration();
+  const readiness = await terminalRecognition.readiness();
   return {
     employees: employees.map((employee) => {
       const account = accountByEmployee.get(String(employee._id));
@@ -140,6 +140,7 @@ async function listEmployees(user, { search = "", page = 1, limit = 50 } = {}) {
     pages: Math.ceil(total / limit),
     configured: readiness.configured,
     missingConfiguration: readiness.missing,
+    runtime: readiness.runtime,
     consent: { version: CONSENT_VERSION, notice: CONSENT_NOTICE },
   };
 }

@@ -6,7 +6,11 @@ const faceProvider = require("./localFaceProvider");
 const {
   CONSENT_VERSION: PRIVATE_CONSENT_VERSION,
 } = require("./biometricService");
-const { protectTemplate, revealTemplate } = require("./biometricTemplate");
+const {
+  readEncryptionKey,
+  protectTemplate,
+  revealTemplate,
+} = require("./biometricTemplate");
 const { samplesMatch, averageEmbedding } = require("./faceEmbeddings");
 const { writeAttendance, geofence } = require("./attendanceWriter");
 
@@ -19,18 +23,18 @@ const sameDate = (left, right) =>
   );
 const personView = (person) => ({ name: person.name, code: person.code });
 
-function configuration() {
-  const config = faceProvider.configuration();
+function configuration(config = faceProvider.configuration()) {
   const missing = [...config.missing];
-  const key = process.env.BIOMETRIC_TEMPLATE_KEY || "";
-  if (
-    !/^[A-Za-z\d+/]{43}=$/.test(key) ||
-    Buffer.from(key, "base64").length !== 32
-  )
+  try {
+    readEncryptionKey().fill(0);
+  } catch {
     missing.push("BIOMETRIC_TEMPLATE_KEY");
-  const threshold = Number(process.env.KIOSK_MATCH_THRESHOLD ?? 0.55);
-  const margin = Number(process.env.KIOSK_MATCH_MARGIN ?? 0.08);
-  const cooldownSeconds = Number(process.env.KIOSK_SCAN_COOLDOWN_SECONDS ?? 30);
+  }
+  const threshold = Number(process.env.KIOSK_MATCH_THRESHOLD?.trim() || 0.55);
+  const margin = Number(process.env.KIOSK_MATCH_MARGIN?.trim() || 0.08);
+  const cooldownSeconds = Number(
+    process.env.KIOSK_SCAN_COOLDOWN_SECONDS?.trim() || 30,
+  );
   if (!Number.isFinite(threshold) || threshold < 0.55 || threshold > 0.99)
     missing.push("KIOSK_MATCH_THRESHOLD");
   if (!Number.isFinite(margin) || margin < 0.05 || margin > 0.5)
@@ -50,6 +54,9 @@ function configuration() {
     cooldownSeconds,
   };
 }
+async function readiness() {
+  return configuration(await faceProvider.readiness());
+}
 function requireConfiguration() {
   const config = configuration();
   if (!config.configured) {
@@ -63,7 +70,7 @@ function requireConfiguration() {
   return config;
 }
 async function status(device) {
-  const config = configuration();
+  const config = await readiness();
   const company = await models.Company.findOne({ _id: device.company })
     .select("latitude longitude radius")
     .lean();
@@ -692,5 +699,6 @@ module.exports = {
   completeAttendance,
   CONSENT_VERSION,
   configuration,
+  readiness,
   requireConfiguration,
 };

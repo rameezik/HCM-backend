@@ -1,5 +1,7 @@
 # Render backend with local face recognition
 
+For the current native Node service and the `configured: false` repair, follow [runtime readiness and deployment instructions](render-face-readiness-fix.md).
+
 Use the repository's Dockerfile for the Render web service. The image installs Node24, Python3.11, pinned CPU OpenCV/NumPy wheels and both SHA-256-verified YuNet/SFace ONNX models. The build loads the real models; a failed install or model check fails the build. No inference request downloads a model. Use `render.yaml` to create a Docker service, or select this Dockerfile in Render. Changing an existing native Node service to Docker may require creating a Docker service and updating Vercel's target.
 
 Set Render secrets/settings without committing their values:

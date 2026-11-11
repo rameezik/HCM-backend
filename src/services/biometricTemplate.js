@@ -3,7 +3,7 @@ const ApiError = require("../utils/ApiError");
 const faceProvider = require("./localFaceProvider");
 
 function readEncryptionKey() {
-  const raw = process.env.BIOMETRIC_TEMPLATE_KEY || "";
+  const raw = process.env.BIOMETRIC_TEMPLATE_KEY?.trim() || "";
   if (
     !/^[A-Za-z\d+/]{43}=$/.test(raw) ||
     Buffer.from(raw, "base64").length !== 32
