@@ -25,7 +25,7 @@ app.use((req, res, next) => {
     req.headers.origin &&
     !origins.includes(req.headers.origin)
   )
-    return res.status(403).json({ message: "Untrusted request origin." });
+    return res.status(403).json({ message: "This request is not permitted." });
   next();
 });
 app.use(express.json({ limit: "1mb" }));
@@ -37,11 +37,14 @@ app.use(
     limit: 300,
     standardHeaders: "draft-8",
     legacyHeaders: false,
+    message: {
+      message: "Too many requests. Please wait a moment and try again.",
+    },
   }),
 );
 app.use("/api", require("./routes"));
 app.use((req, res) =>
-  res.status(404).json({ message: "API endpoint not found." }),
+  res.status(404).json({ message: "The requested service was not found." }),
 );
 app.use(errorHandler);
 module.exports = app;

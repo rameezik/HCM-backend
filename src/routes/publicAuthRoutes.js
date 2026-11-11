@@ -7,6 +7,7 @@ const M = require("../models");
 const C = require("../services/context");
 const { withCompany } = require("../services/companyContext");
 const recovery = require("../services/authRecoveryService");
+const { password } = require("./schemas/common");
 const text = z.string().trim().min(1).max(200);
 const email = z
   .string()
@@ -14,7 +15,6 @@ const email = z
   .email()
   .max(254)
   .transform((value) => value.toLowerCase());
-const password = z.string().min(12).max(128);
 const wrap = (fn) => (req, res, next) =>
   Promise.resolve(fn(req, res)).catch(next);
 const limiter = (limit) =>

@@ -15,6 +15,9 @@ const loginLimit = rateLimit({
   limit: 30,
   standardHeaders: "draft-8",
   legacyHeaders: false,
+  message: {
+    message: "Too many sign-in attempts. Please try again in 15 minutes.",
+  },
 });
 const router = express.Router();
 

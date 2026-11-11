@@ -1,12 +1,31 @@
 const { ZodError } = require("zod");
 
+function publicServerMessage(error, status) {
+  const featureMessages = {
+    AUTH_RECOVERY_NOT_CONFIGURED:
+      "Password recovery is unavailable. Please contact your administrator.",
+    AI_NOT_CONFIGURED:
+      "AI features are unavailable. Please contact your administrator.",
+    BIOMETRIC_NOT_CONFIGURED:
+      "Face attendance is unavailable. Please contact your administrator.",
+  };
+  if (Object.hasOwn(featureMessages, error.code))
+    return featureMessages[error.code];
+  if (status === 502) return "Connection unavailable. Please try again.";
+  if (status === 503)
+    return "This service is currently unavailable. Please try again later or contact your administrator.";
+  if (status === 504)
+    return "The request timed out. Check your changes before trying again.";
+  return "Something went wrong. Please try again.";
+}
+
 function errorHandler(error, req, res, next) {
   if (res.headersSent) return next(error);
 
   if (error.type === "entity.parse.failed") {
     return res
       .status(400)
-      .json({ message: "Request body must contain valid JSON." });
+      .json({ message: "Unable to process your request. Please try again." });
   }
 
   if (error instanceof ZodError) {
@@ -36,7 +55,8 @@ function errorHandler(error, req, res, next) {
 
   if (error.message?.includes("Transaction numbers are only allowed")) {
     return res.status(503).json({
-      message: "MongoDB must run as a replica set to support atomic workflows.",
+      message:
+        "This service is currently unavailable. Please contact your administrator.",
     });
   }
 
@@ -45,10 +65,9 @@ function errorHandler(error, req, res, next) {
     console.error("API failure:", error.name, error.code || status);
 
   const response = {
-    message:
-      status === 500 ? "An unexpected server error occurred." : error.message,
+    message: status >= 500 ? publicServerMessage(error, status) : error.message,
   };
-  if (error.details) response.details = error.details;
+  if (status < 500 && error.details) response.details = error.details;
   if (
     typeof error.code === "string" &&
     /^(?:AI_|AUTH_|BIOMETRIC_)/.test(error.code)

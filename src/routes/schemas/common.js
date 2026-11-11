@@ -10,6 +10,9 @@ const email = z
   .email()
   .max(254)
   .transform((v) => v.toLowerCase());
-const password = z.string().min(12).max(128);
+const password = z
+  .string()
+  .min(8, "Password must contain at least 8 characters.")
+  .max(128);
 
 module.exports = { id, text, date, email, password };
