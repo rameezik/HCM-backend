@@ -1,9 +1,14 @@
-const crypto = require("node:crypto");
-const mongoose = require("mongoose");
-const M = require("../models");
-const C = require("./context");
+const models = require("../models");
+const context = require("./context");
 const ApiError = require("../utils/ApiError");
-const provider = require("./localFaceProvider");
+const faceProvider = require("./localFaceProvider");
+const {
+  readEncryptionKey,
+  isNormalizedEmbedding,
+  protectTemplate,
+  revealTemplate,
+} = require("./biometricTemplate");
+const { samplesMatch, averageEmbedding } = require("./faceEmbeddings");
 const CONSENT_VERSION = "2026-10-25-local-v1";
 const NOTICE =
   "With your explicit consent, three camera samples are sent to your company’s own server for local YuNet detection, landmark alignment and SFace identity matching. No cloud biometric service or external API is used. The encrypted facial embedding is stored with your company and employee account; raw images are processed transiently and are not saved by the application. This system does not provide robust liveness or presentation-attack detection: a replay, photograph or injected camera stream may defeat it. Enrollment expires under the retention policy and can be deleted at any time. Database backups follow the operator’s separate retention schedule. Web attendance and HR corrections remain available without biometric consent.";
@@ -19,92 +24,8 @@ function requirePerson(user) {
     );
   return ownFilter(user);
 }
-function encryptionKey() {
-  const raw = process.env.BIOMETRIC_TEMPLATE_KEY || "";
-  if (
-    !/^[A-Za-z\d+/]{43}=$/.test(raw) ||
-    Buffer.from(raw, "base64").length !== 32
-  )
-    throw new ApiError(
-      503,
-      "Local biometric encryption is not configured. Run npm run setup:env for development or configure BIOMETRIC_TEMPLATE_KEY securely on the backend.",
-    );
-  return Buffer.from(raw, "base64");
-}
-const aad = (company, employee) =>
-  Buffer.from(`${company}:${employee}:${provider.PROVIDER}:template-v1`);
-function validVector(vector) {
-  return (
-    Array.isArray(vector) &&
-    vector.length === 128 &&
-    vector.every(Number.isFinite) &&
-    Math.abs(Math.hypot(...vector) - 1) < 0.01
-  );
-}
-function protectTemplate(template, company, employee) {
-  const key = encryptionKey(),
-    iv = crypto.randomBytes(12);
-  let plaintext;
-  try {
-    plaintext = Buffer.from(JSON.stringify(template));
-    const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
-    cipher.setAAD(aad(company, employee));
-    const ciphertext = Buffer.concat([
-      cipher.update(plaintext),
-      cipher.final(),
-    ]);
-    return {
-      ciphertext: ciphertext.toString("base64"),
-      iv: iv.toString("base64"),
-      tag: cipher.getAuthTag().toString("base64"),
-      keyVersion: process.env.BIOMETRIC_TEMPLATE_KEY_ID || "v1",
-    };
-  } finally {
-    key.fill(0);
-    plaintext?.fill(0);
-  }
-}
-function revealTemplate(protectedTemplate, company, employee) {
-  const key = encryptionKey();
-  let plaintext;
-  try {
-    if (
-      !protectedTemplate ||
-      protectedTemplate.keyVersion !==
-        (process.env.BIOMETRIC_TEMPLATE_KEY_ID || "v1")
-    )
-      throw Error("Key version mismatch");
-    const decipher = crypto.createDecipheriv(
-      "aes-256-gcm",
-      key,
-      Buffer.from(protectedTemplate.iv, "base64"),
-    );
-    decipher.setAAD(aad(company, employee));
-    decipher.setAuthTag(Buffer.from(protectedTemplate.tag, "base64"));
-    plaintext = Buffer.concat([
-      decipher.update(Buffer.from(protectedTemplate.ciphertext, "base64")),
-      decipher.final(),
-    ]);
-    const template = JSON.parse(plaintext.toString("utf8"));
-    if (
-      template.provider !== provider.PROVIDER ||
-      typeof template.modelVersion !== "string" ||
-      !validVector(template.embedding)
-    )
-      throw Error("Invalid template");
-    return template;
-  } catch {
-    throw new ApiError(
-      503,
-      "Your encrypted face template cannot be read. Contact Admin; preserve the original biometric encryption key.",
-    );
-  } finally {
-    key.fill(0);
-    plaintext?.fill(0);
-  }
-}
 async function log(session, user, action, details) {
-  await M.AuditLog.create(
+  await models.AuditLog.create(
     [
       {
         company: user.company,
@@ -123,12 +44,12 @@ function enrollmentView(row) {
   return row
     ? {
         enrolled:
-          row.provider === provider.PROVIDER &&
+          row.provider === faceProvider.PROVIDER &&
           row.status === "active" &&
           row.expiresAt > new Date() &&
           row.consentVersion === CONSENT_VERSION,
         status:
-          row.provider === provider.PROVIDER
+          row.provider === faceProvider.PROVIDER
             ? row.status
             : "legacy-enrollment-requires-cleanup",
         provider: row.provider,
@@ -139,35 +60,35 @@ function enrollmentView(row) {
     : { enrolled: false, status: "not-enrolled" };
 }
 async function retentionDaysFor(user) {
-  const company = await M.Company.findOne({ _id: user.company })
+  const company = await models.Company.findOne({ _id: user.company })
     .select("biometricRetentionDays")
     .lean();
   if (!company) throw new ApiError(403, "Company policy is unavailable.");
   return Math.min(
-    provider.configuration().retentionDays,
+    faceProvider.configuration().retentionDays,
     Math.max(1, Math.min(365, company.biometricRetentionDays || 365)),
   );
 }
 function requireConfiguration() {
-  const config = provider.requireConfiguration();
-  encryptionKey().fill(0);
+  const config = faceProvider.requireConfiguration();
+  readEncryptionKey().fill(0);
   return config;
 }
 async function status(user) {
-  const config = provider.configuration();
+  const config = faceProvider.configuration();
   const missing = [...(config.missing || [])];
   try {
-    encryptionKey().fill(0);
+    readEncryptionKey().fill(0);
   } catch {
     missing.push("BIOMETRIC_TEMPLATE_KEY");
   }
   const linked = Boolean(user.company && user.employee),
     configured = linked && config.configured && missing.length === 0;
   const enrollment = linked
-    ? await M.BiometricEnrollment.findOne(ownFilter(user)).lean()
+    ? await models.BiometricEnrollment.findOne(ownFilter(user)).lean()
     : null;
   const office = user.company
-    ? await M.Company.findOne({ _id: user.company })
+    ? await models.Company.findOne({ _id: user.company })
         .select("latitude longitude radius")
         .lean()
     : null;
@@ -179,14 +100,14 @@ async function status(user) {
       office.radius > 0,
   );
   const attendance = linked
-    ? await M.Attendance.findOne(ownFilter(user))
+    ? await models.Attendance.findOne(ownFilter(user))
         .sort({ checkIn: -1 })
         .select("date checkIn checkOut status hours verificationMethod")
         .lean()
     : null;
   return {
     configured,
-    provider: provider.PROVIDER,
+    provider: faceProvider.PROVIDER,
     modelVersion: config.modelVersion,
     officeConfigured,
     missingConfiguration: [...new Set(missing)],
@@ -221,7 +142,7 @@ async function status(user) {
 async function createChallenge(user, body) {
   const filter = requirePerson(user);
   requireConfiguration();
-  const employee = await M.Employee.findOne({
+  const employee = await models.Employee.findOne({
     _id: user.employee,
     company: user.company,
   }).lean();
@@ -231,7 +152,7 @@ async function createChallenge(user, body) {
       "Facial attendance is unavailable for this employee.",
     );
   if (
-    (await M.BiometricChallenge.countDocuments({
+    (await models.BiometricChallenge.countDocuments({
       ...filter,
       state: "failed",
       createdAt: { $gte: new Date(Date.now() - 15 * 60000) },
@@ -241,7 +162,7 @@ async function createChallenge(user, body) {
       429,
       "Too many unsuccessful verifications. Try again after 15 minutes or use ordinary attendance.",
     );
-  const enrollment = await M.BiometricEnrollment.findOne(filter).lean();
+  const enrollment = await models.BiometricEnrollment.findOne(filter).lean();
   if (body.purpose === "enroll") {
     if (body.consent !== true || body.consentVersion !== CONSENT_VERSION)
       throw new ApiError(
@@ -258,11 +179,11 @@ async function createChallenge(user, body) {
       422,
       "A current local face enrollment and consent are required.",
     );
-  const challenge = await M.BiometricChallenge.create({
+  const challenge = await models.BiometricChallenge.create({
     ...filter,
     user: user._id,
     purpose: body.purpose,
-    provider: provider.PROVIDER,
+    provider: faceProvider.PROVIDER,
     consentVersion: body.purpose === "enroll" ? CONSENT_VERSION : undefined,
     consentAt: body.purpose === "enroll" ? new Date() : undefined,
     expiresAt: new Date(Date.now() + 2 * 60000),
@@ -272,19 +193,19 @@ async function createChallenge(user, body) {
   await log(null, user, "biometric_challenge_created", {
     challengeId: challenge._id,
     purpose: body.purpose,
-    provider: provider.PROVIDER,
+    provider: faceProvider.PROVIDER,
   });
   return {
     challengeId: challenge._id,
     expiresAt: challenge.expiresAt,
-    provider: provider.PROVIDER,
+    provider: faceProvider.PROVIDER,
     capture: { samples: 3, maxWidth: 640, maxImageBytes: 250000 },
     livenessSupported: false,
   };
 }
 async function claim(user, id, purpose) {
   const now = new Date();
-  await M.BiometricChallenge.updateMany(
+  await models.BiometricChallenge.updateMany(
     {
       company: user.company,
       purpose: "enroll",
@@ -295,12 +216,12 @@ async function claim(user, id, purpose) {
   );
   let challenge;
   try {
-    challenge = await M.BiometricChallenge.findOneAndUpdate(
+    challenge = await models.BiometricChallenge.findOneAndUpdate(
       {
         _id: id,
         ...requirePerson(user),
         user: user._id,
-        provider: provider.PROVIDER,
+        provider: faceProvider.PROVIDER,
         purpose,
         state: "created",
         expiresAt: { $gt: now },
@@ -325,7 +246,7 @@ async function claim(user, id, purpose) {
   return challenge;
 }
 async function recordFailure(challenge, user, error) {
-  await M.BiometricChallenge.updateOne(
+  await models.BiometricChallenge.updateOne(
     { _id: challenge._id, ...ownFilter(user), state: "verifying" },
     {
       state: "failed",
@@ -342,12 +263,12 @@ async function recordFailure(challenge, user, error) {
   });
 }
 async function consume(challenge, user, session) {
-  const result = await M.BiometricChallenge.updateOne(
+  const result = await models.BiometricChallenge.updateOne(
     {
       _id: challenge._id,
       ...ownFilter(user),
       user: user._id,
-      provider: provider.PROVIDER,
+      provider: faceProvider.PROVIDER,
       state: "verifying",
       expiresAt: { $gt: new Date() },
     },
@@ -361,7 +282,7 @@ async function consume(challenge, user, session) {
     );
 }
 async function lockAccount(user, session) {
-  const account = await M.User.findOneAndUpdate(
+  const account = await models.User.findOneAndUpdate(
     {
       _id: user._id,
       company: user.company,
@@ -374,25 +295,58 @@ async function lockAccount(user, session) {
   if (!account)
     throw new ApiError(403, "This employee account is no longer active.");
 }
-function meanEmbedding(embeddings) {
-  if (embeddings.length !== 3 || embeddings.some((e) => !validVector(e)))
+function buildEnrollmentEmbedding(embeddings) {
+  if (
+    embeddings.length !== 3 ||
+    embeddings.some((embedding) => !isNormalizedEmbedding(embedding))
+  ) {
     throw new ApiError(422, "Three usable face samples are required.");
-  const threshold = provider.configuration().similarityThreshold;
-  for (let i = 0; i < 3; i++)
-    for (let j = i + 1; j < 3; j++)
-      if (provider.compare(embeddings[i], embeddings[j]) < threshold)
-        throw new ApiError(
-          422,
-          "The capture samples do not match one identity. Retry with one face and good lighting.",
-        );
-  const mean = embeddings[0].map(
-      (_, i) => embeddings.reduce((sum, e) => sum + e[i], 0) / 3,
-    ),
-    norm = Math.hypot(...mean);
-  if (norm < 0.001)
+  }
+  const threshold = faceProvider.configuration().similarityThreshold;
+  if (!samplesMatch(embeddings, threshold)) {
+    throw new ApiError(
+      422,
+      "The capture samples do not match one identity. Retry with one face and good lighting.",
+    );
+  }
+  const embedding = averageEmbedding(embeddings);
+  if (!embedding) {
     throw new ApiError(422, "The captured face samples are not consistent.");
-  return mean.map((v) => v / norm);
+  }
+  return embedding;
 }
+async function rejectDuplicateEnrollment(user, modelVersion, embedding) {
+  // The partial unique challenge index serializes company enrollment checks.
+  const rows = models.BiometricEnrollment.find({
+    company: user.company,
+    provider: faceProvider.PROVIDER,
+    status: "active",
+    expiresAt: { $gt: new Date() },
+  })
+    .select("+protectedTemplate")
+    .cursor();
+  for await (const other of rows) {
+    const template = revealTemplate(
+      other.protectedTemplate,
+      user.company,
+      other.employee,
+    );
+    try {
+      if (
+        template.modelVersion === modelVersion &&
+        faceProvider.compare(template.embedding, embedding) >=
+          faceProvider.configuration().similarityThreshold
+      )
+        throw new ApiError(
+          409,
+          "This face is already enrolled in this company. Contact Admin.",
+        );
+    } finally {
+      template.embedding.fill(0);
+    }
+  }
+}
+
 async function completeEnrollment(user, challengeId, samples) {
   const filter = requirePerson(user);
   requireConfiguration();
@@ -401,40 +355,12 @@ async function completeEnrollment(user, challengeId, samples) {
   try {
     if (challenge.consentVersion !== CONSENT_VERSION || !challenge.consentAt)
       throw new ApiError(422, "Fresh explicit consent is required.");
-    extracted = await provider.extractSamples(samples);
-    embedding = meanEmbedding(extracted.embeddings);
-    // The partial unique challenge index serializes company enrollment checks.
-    const rows = M.BiometricEnrollment.find({
-      company: user.company,
-      provider: provider.PROVIDER,
-      status: "active",
-      expiresAt: { $gt: new Date() },
-    })
-      .select("+protectedTemplate")
-      .cursor();
-    for await (const other of rows) {
-      const template = revealTemplate(
-        other.protectedTemplate,
-        user.company,
-        other.employee,
-      );
-      try {
-        if (
-          template.modelVersion === extracted.modelVersion &&
-          provider.compare(template.embedding, embedding) >=
-            provider.configuration().similarityThreshold
-        )
-          throw new ApiError(
-            409,
-            "This face is already enrolled in this company. Contact Admin.",
-          );
-      } finally {
-        template.embedding.fill(0);
-      }
-    }
-    const result = await C.transaction(async (session) => {
+    extracted = await faceProvider.extractSamples(samples);
+    embedding = buildEnrollmentEmbedding(extracted.embeddings);
+    await rejectDuplicateEnrollment(user, extracted.modelVersion, embedding);
+    const result = await context.transaction(async (session) => {
       await lockAccount(user, session);
-      const person = await M.Employee.findOneAndUpdate(
+      const person = await models.Employee.findOneAndUpdate(
         {
           _id: user.employee,
           company: user.company,
@@ -445,14 +371,14 @@ async function completeEnrollment(user, challengeId, samples) {
       );
       if (!person)
         throw new ApiError(403, "This employee is no longer active.");
-      if (await M.BiometricEnrollment.exists(filter).session(session))
+      if (await models.BiometricEnrollment.exists(filter).session(session))
         throw new ApiError(409, "An enrollment already exists.");
       await consume(challenge, user, session);
-      const [row] = await M.BiometricEnrollment.create(
+      const [row] = await models.BiometricEnrollment.create(
         [
           {
             ...filter,
-            provider: provider.PROVIDER,
+            provider: faceProvider.PROVIDER,
             status: "active",
             // Private enrollment never opts a newly captured template into a public kiosk.
             kioskEnabled: false,
@@ -462,7 +388,7 @@ async function completeEnrollment(user, challengeId, samples) {
             modelVersion: extracted.modelVersion,
             protectedTemplate: protectTemplate(
               {
-                provider: provider.PROVIDER,
+                provider: faceProvider.PROVIDER,
                 modelVersion: extracted.modelVersion,
                 embedding,
               },
@@ -482,7 +408,7 @@ async function completeEnrollment(user, challengeId, samples) {
       await log(session, user, "biometric_enrolled", {
         enrollmentId: row._id,
         employee: user.employee,
-        provider: provider.PROVIDER,
+        provider: faceProvider.PROVIDER,
         modelVersion: extracted.modelVersion,
         consentAt: row.consentAt,
         consentVersion: CONSENT_VERSION,
@@ -516,9 +442,9 @@ async function completeAttendance(
   const challenge = await claim(user, challengeId, action);
   let extracted, template;
   try {
-    const enrollment = await M.BiometricEnrollment.findOne({
+    const enrollment = await models.BiometricEnrollment.findOne({
       ...filter,
-      provider: provider.PROVIDER,
+      provider: faceProvider.PROVIDER,
       status: "active",
       consentVersion: CONSENT_VERSION,
       expiresAt: { $gt: new Date() },
@@ -533,8 +459,8 @@ async function completeAttendance(
       user.company,
       user.employee,
     );
-    extracted = await provider.extractSamples(samples);
-    meanEmbedding(extracted.embeddings).fill(0);
+    extracted = await faceProvider.extractSamples(samples);
+    buildEnrollmentEmbedding(extracted.embeddings).fill(0);
     if (template.modelVersion !== extracted.modelVersion)
       throw new ApiError(
         422,
@@ -542,21 +468,21 @@ async function completeAttendance(
       );
     const similarity = Math.min(
       ...extracted.embeddings.map((e) =>
-        provider.compare(template.embedding, e),
+        faceProvider.compare(template.embedding, e),
       ),
     );
-    if (similarity < provider.configuration().similarityThreshold)
+    if (similarity < faceProvider.configuration().similarityThreshold)
       throw new ApiError(
         422,
         "The captured face does not match your enrollment. No attendance was recorded.",
       );
-    return await C.transaction(async (session) => {
+    return await context.transaction(async (session) => {
       await lockAccount(user, session);
-      const active = await M.BiometricEnrollment.findOneAndUpdate(
+      const active = await models.BiometricEnrollment.findOneAndUpdate(
         {
           _id: enrollment._id,
           ...filter,
-          provider: provider.PROVIDER,
+          provider: faceProvider.PROVIDER,
           status: "active",
           expiresAt: { $gt: new Date() },
         },
@@ -574,7 +500,7 @@ async function completeAttendance(
         location,
         verification: {
           method: "face",
-          provider: provider.PROVIDER,
+          provider: faceProvider.PROVIDER,
           modelVersion: extracted.modelVersion,
           challengeId: challenge._id,
           similarity,
@@ -600,13 +526,13 @@ async function removeEnrollment(user, employeeId = user.employee) {
   )
     throw new ApiError(403, "You cannot remove this enrollment.");
   const filter = { company: user.company, employee: employeeId };
-  return C.transaction(async (session) => {
-    const row = await M.BiometricEnrollment.findOneAndUpdate(
+  return context.transaction(async (session) => {
+    const row = await models.BiometricEnrollment.findOneAndUpdate(
       filter,
       { status: "deleting", deleteRequestedAt: new Date(), $inc: { __v: 1 } },
       { returnDocument: "after", session },
     );
-    await M.BiometricChallenge.updateMany(
+    await models.BiometricChallenge.updateMany(
       { ...filter, state: { $in: ["created", "verifying"] } },
       {
         state: "failed",
@@ -625,8 +551,8 @@ async function removeEnrollment(user, employeeId = user.employee) {
       enrollmentId: row._id,
       employee: employeeId,
     });
-    if (row.provider !== provider.PROVIDER) {
-      await M.BiometricEnrollment.updateOne(
+    if (row.provider !== faceProvider.PROVIDER) {
+      await models.BiometricEnrollment.updateOne(
         { _id: row._id, ...filter },
         { status: "delete_failed" },
         { session },
@@ -638,7 +564,7 @@ async function removeEnrollment(user, employeeId = user.employee) {
           "Recognition is disabled. This legacy cloud enrollment cannot be deleted by the local engine. Admin must confirm deletion at the former provider; its encrypted cleanup reference is preserved.",
       };
     }
-    await M.BiometricEnrollment.deleteOne(
+    await models.BiometricEnrollment.deleteOne(
       { _id: row._id, ...filter },
       { session },
     );
@@ -655,19 +581,22 @@ async function removeEnrollment(user, employeeId = user.employee) {
   });
 }
 async function cleanupCompany(companyId) {
-  const exited = await M.Employee.find({ company: companyId, status: "exited" })
+  const exited = await models.Employee.find({
+    company: companyId,
+    status: "exited",
+  })
     .select("_id")
     .lean();
-  const inactive = await M.User.find({
+  const inactive = await models.User.find({
     company: companyId,
     active: false,
     employee: { $ne: null },
   })
     .select("employee")
     .lean();
-  const rows = await M.BiometricEnrollment.find({
+  const rows = await models.BiometricEnrollment.find({
     company: companyId,
-    provider: provider.PROVIDER,
+    provider: faceProvider.PROVIDER,
     $or: [
       {
         employee: {

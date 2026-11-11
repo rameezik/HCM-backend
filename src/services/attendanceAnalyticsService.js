@@ -1,9 +1,8 @@
 const mongoose = require("mongoose");
 const { z } = require("zod");
-const M = require("../models");
+const models = require("../models");
 const ApiError = require("../utils/ApiError");
 const { dates, isoDate } = require("./rules");
-
 const objectId = (value, label) => {
   const id = value?._id || value;
   if (!mongoose.isValidObjectId(id))
@@ -26,7 +25,6 @@ const querySchema = z
     limit: z.coerce.number().int().min(1).max(100).default(50),
   })
   .strict();
-
 function localDate(now, timezone) {
   try {
     const parts = new Intl.DateTimeFormat("en-CA", {
@@ -43,7 +41,6 @@ function localDate(now, timezone) {
     throw new ApiError(422, "The company attendance timezone is invalid.");
   }
 }
-
 const sumIf = (expression) => ({ $sum: { $cond: [expression, 1, 0] } });
 const same = (key, value) => ({ $eq: [key, value] });
 function countsGroup(key) {
@@ -63,9 +60,7 @@ function countsGroup(key) {
       denominator: {
         $sum: {
           $cond: [
-            {
-              $and: ["$isWorkingDay", { $ne: ["$status", "on_leave"] }],
-            },
+            { $and: ["$isWorkingDay", { $ne: ["$status", "on_leave"] }] },
             1,
             0,
           ],
@@ -119,7 +114,6 @@ const emptyCounts = () => ({
   attendanceRate: 0,
   workedHours: 0,
 });
-
 function rowsPipeline(companyId, calendar, workDates, now, maximumShiftHours) {
   const lowerDate = calendar[0];
   const upperDate = calendar.at(-1);
@@ -130,7 +124,7 @@ function rowsPipeline(companyId, calendar, workDates, now, maximumShiftHours) {
   return [
     {
       $lookup: {
-        from: M.Department.collection.name,
+        from: models.Department.collection.name,
         let: { department: "$department" },
         pipeline: [
           {
@@ -150,15 +144,10 @@ function rowsPipeline(companyId, calendar, workDates, now, maximumShiftHours) {
     },
     {
       $lookup: {
-        from: M.Attendance.collection.name,
+        from: models.Attendance.collection.name,
         let: { employee: "$_id" },
         pipeline: [
-          {
-            $match: {
-              date: { $in: calendar },
-              $expr: { $and: reference },
-            },
-          },
+          { $match: { date: { $in: calendar }, $expr: { $and: reference } } },
           {
             $project: {
               _id: 1,
@@ -182,7 +171,7 @@ function rowsPipeline(companyId, calendar, workDates, now, maximumShiftHours) {
     },
     {
       $lookup: {
-        from: M.Leave.collection.name,
+        from: models.Leave.collection.name,
         let: { employee: "$_id" },
         pipeline: [
           {
@@ -425,7 +414,7 @@ async function analytics(user, input = {}, options = {}) {
       );
     query.employee = String(user.employee);
   }
-  const company = await M.Company.findOne({ _id: companyId }).lean();
+  const company = await models.Company.findOne({ _id: companyId }).lean();
   if (!company) throw new ApiError(404, "Company not found.");
   const timezone = company.timezone || "UTC";
   const now = options.now ? new Date(options.now) : new Date();
@@ -462,7 +451,7 @@ async function analytics(user, input = {}, options = {}) {
   const cappedEnd = end < asOf ? end : asOf;
   const selectedDays = start <= cappedEnd ? dates(start, cappedEnd) : [];
   const allDays = [...new Set([...selectedDays, asOf])].sort();
-  const holidays = await M.Holiday.find({
+  const holidays = await models.Holiday.find({
     company: companyId,
     date: { $in: allDays },
   })
@@ -601,24 +590,24 @@ async function analytics(user, input = {}, options = {}) {
   // The independent read-only aggregates use the same explicit company/role scope.
   const [data, headcount, todayHeadcount, departmentOptions, employeeOptions] =
     await Promise.all([
-      M.Employee.aggregate(pipeline).allowDiskUse(true),
-      M.Employee.aggregate([
+      models.Employee.aggregate(pipeline).allowDiskUse(true),
+      models.Employee.aggregate([
         { $match: { ...match, ...activeAt(cappedEnd) } },
         { $count: "total" },
       ]),
-      M.Employee.aggregate([
+      models.Employee.aggregate([
         { $match: { ...match, ...activeAt(asOf) } },
         { $count: "total" },
       ]),
       user.role === "employee"
         ? []
-        : M.Department.find({ company: companyId })
+        : models.Department.find({ company: companyId })
             .select("name")
             .sort({ name: 1 })
             .lean(),
       user.role === "employee"
         ? []
-        : M.Employee.find({ company: companyId })
+        : models.Employee.find({ company: companyId })
             .select("name code department")
             .sort({ name: 1 })
             .limit(500)
@@ -669,5 +658,4 @@ async function analytics(user, input = {}, options = {}) {
       summary.onLeave === 0,
   };
 }
-
 module.exports = { analytics, localDate };

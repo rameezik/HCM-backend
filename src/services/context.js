@@ -1,24 +1,25 @@
 const mongoose = require("mongoose");
-const M = require("../models");
+const models = require("../models");
 const ApiError = require("../utils/ApiError");
 const { today, workingDays } = require("./rules");
 async function transaction(work) {
   return mongoose.connection.transaction(async (session) => work(session));
 }
+const sensitiveAuditField =
+  /password|tokenVersion|protectedReference|protectedTemplate|embedding|samples|providerSessionId|ciphertext|faceId|collectionId/i;
+
+function redactAuditData(value) {
+  if (value == null) return null;
+  return JSON.parse(
+    JSON.stringify(value, (key, fieldValue) => {
+      if (sensitiveAuditField.test(key)) return undefined;
+      return fieldValue;
+    }),
+  );
+}
+
 async function audit(session, actor, action, entity, before, after) {
-  const clean = (value) =>
-    value == null
-      ? null
-      : JSON.parse(
-          JSON.stringify(value, (k, v) =>
-            /password|tokenVersion|protectedReference|protectedTemplate|embedding|samples|providerSessionId|ciphertext|faceId|collectionId/i.test(
-              k,
-            )
-              ? undefined
-              : v,
-          ),
-        );
-  await M.AuditLog.create(
+  await models.AuditLog.create(
     [
       {
         actor: actor?._id,
@@ -26,15 +27,15 @@ async function audit(session, actor, action, entity, before, after) {
         action,
         entity,
         entityId: String(after?._id || before?._id || ""),
-        before: clean(before),
-        after: clean(after),
+        before: redactAuditData(before),
+        after: redactAuditData(after),
       },
     ],
     { session },
   );
 }
 async function notify(session, recipient, message) {
-  await M.Notification.create([{ recipient, message }], { session });
+  await models.Notification.create([{ recipient, message }], { session });
 }
 const scope = (user) =>
   user.role === "employee" ? { employee: user.employee || null } : {};
@@ -49,11 +50,11 @@ function requireEmployee(user) {
   return user.employee;
 }
 async function settings(session) {
-  const company = await M.Company.findOne()
+  const company = await models.Company.findOne()
     .session(session || null)
     .lean();
   if (!company) throw new ApiError(409, "Complete first-run setup.");
-  const holidays = await M.Holiday.find()
+  const holidays = await models.Holiday.find()
     .session(session || null)
     .lean();
   return { company, holidays };

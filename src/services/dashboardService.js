@@ -1,4 +1,4 @@
-const M = require("../models");
+const models = require("../models");
 const mongoose = require("mongoose");
 const ApiError = require("../utils/ApiError");
 const { board } = require("./attendanceService");
@@ -6,6 +6,183 @@ const { businessDate } = require("./attendanceWriter");
 const { balances } = require("./leaveService");
 const { employeeScope, range, settings } = require("./context");
 const { round } = require("./rules");
+async function summarizeLeaveUsage(approvedLeaves, byDepartment, start, end) {
+  const leaveMap = new Map();
+  for (const leave of approvedLeaves) {
+    const name = leave.type?.name || "Unknown type";
+    const employee = await models.Employee.findById(leave.employee)
+      .populate("department", "name")
+      .lean();
+    const department = employee?.department?.name || "Unassigned";
+    const key = `${name}:${department}`;
+    const entry = leaveMap.get(key) || {
+      name,
+      department,
+      approvedDays: 0,
+      quota: leave.type?.unpaid ? null : leave.type?.quota || 0,
+    };
+    entry.approvedDays += leave.days.filter(
+      (date) => date >= start && date <= end,
+    ).length;
+    leaveMap.set(key, entry);
+  }
+  const departmentCounts = new Map(
+    byDepartment.map((department) => [department.name, department.count]),
+  );
+  const leaveUtilization = [...leaveMap.values()].map((leave) => ({
+    ...leave,
+    utilization:
+      leave.quota && departmentCounts.get(leave.department)
+        ? round(
+            (leave.approvedDays /
+              (leave.quota * departmentCounts.get(leave.department))) *
+              100,
+          )
+        : null,
+  }));
+  return leaveUtilization;
+}
+function summarizeAttendanceRows(records) {
+  const lateMap = new Map(),
+    trendMap = new Map(),
+    departmentMap = new Map();
+  for (const record of records) {
+    if (record.late) {
+      const old = lateMap.get(String(record.employee._id)) || {
+        name: record.employee.name,
+        code: record.employee.code,
+        count: 0,
+      };
+      old.count++;
+      lateMap.set(String(record.employee._id), old);
+    }
+    const trend = trendMap.get(record.date) || {
+      date: record.date,
+      present: 0,
+      late: 0,
+      absent: 0,
+      onLeave: 0,
+    };
+    if (
+      ["present", "late", "missing_checkout", "half_day"].includes(
+        record.status,
+      )
+    )
+      trend.present += record.status === "half_day" ? 0.5 : 1;
+    if (record.late) trend.late++;
+    if (record.status === "absent") trend.absent++;
+    if (record.status === "on_leave") trend.onLeave++;
+    trendMap.set(record.date, trend);
+    const name = record.employee.department?.name || "Unassigned";
+    const dep = departmentMap.get(name) || {
+      name,
+      expectedDays: 0,
+      absent: 0,
+      late: 0,
+      presentOrLate: 0,
+      leaveDays: 0,
+    };
+    dep.expectedDays++;
+    if (record.status === "absent") dep.absent++;
+    if (record.late) dep.late++;
+    if (["present", "late"].includes(record.status)) dep.presentOrLate++;
+    if (record.status === "on_leave") dep.leaveDays++;
+    departmentMap.set(name, dep);
+  }
+  return { lateMap, trendMap, departmentMap };
+}
+async function loadCompanySummary(user, company, asOf, now, query, todayRows) {
+  // These operational counters describe the current company, independently
+  // of the historical reporting range/department filters above.
+  const companyFilter = { company: company._id };
+  const [
+    totalEmployees,
+    activeEmployees,
+    totalDepartments,
+    totalHrUsers,
+    activeHrUsers,
+    pendingLeaveRequests,
+    currentRows,
+  ] = await Promise.all([
+    models.Employee.countDocuments(companyFilter),
+    models.Employee.countDocuments({
+      ...companyFilter,
+      joinDate: { $lte: asOf },
+      $or: [
+        { exitDate: { $exists: false } },
+        { exitDate: "" },
+        { exitDate: null },
+        { exitDate: { $gt: asOf } },
+      ],
+    }),
+    models.Department.countDocuments(companyFilter),
+    models.User.countDocuments({ ...companyFilter, role: "hr" }),
+    models.User.countDocuments({ ...companyFilter, role: "hr", active: true }),
+    models.Leave.countDocuments({ ...companyFilter, status: "pending" }),
+    query.department
+      ? board(user, { start: asOf, end: asOf }, undefined, { now })
+      : Promise.resolve(todayRows),
+  ]);
+  return {
+    date: asOf,
+    totalEmployees,
+    activeEmployees,
+    totalDepartments,
+    totalHrUsers,
+    activeHrUsers,
+    presentEmployees: currentRows.filter((row) =>
+      ["present", "late", "half_day", "missing_checkout"].includes(row.status),
+    ).length,
+    absentEmployees: currentRows.filter((row) => row.status === "absent")
+      .length,
+    onLeaveEmployees: currentRows.filter((row) => row.status === "on_leave")
+      .length,
+    lateEmployees: currentRows.filter((row) => row.late).length,
+    pendingLeaveRequests,
+    todayAttendance: currentRows.map((row) => ({
+      employee: row.employee,
+      date: row.date,
+      status: row.status,
+      checkIn: row.checkIn || null,
+      checkOut: row.checkOut || null,
+      hours: row.hours,
+      late: row.late,
+      verificationMethod: row.verificationMethod || null,
+    })),
+  };
+}
+async function loadEmployeeSummary(user, asOf) {
+  const leaveBalance = await balances(user);
+  const weekStart = new Date(`${asOf}T00:00:00.000Z`);
+  weekStart.setUTCDate(
+    weekStart.getUTCDate() - ((weekStart.getUTCDay() + 6) % 7),
+  );
+  const hours = await models.Attendance.aggregate([
+    {
+      $match: {
+        employee: user.employee,
+        date: { $gte: weekStart.toISOString().slice(0, 10), $lte: asOf },
+      },
+    },
+    { $group: { _id: null, hours: { $sum: "$hours" } } },
+  ]);
+  const weeklyHours = round(hours[0]?.hours || 0);
+  const last = await models.Payroll.findOne({
+    status: "finalized",
+    "slips.employee": user.employee,
+  })
+    .sort({ month: -1 })
+    .lean();
+  const lastPayslip = last
+    ? {
+        month: last.month,
+        net: last.slips.find(
+          (slip) => String(slip.employee) === String(user.employee),
+        )?.net,
+      }
+    : null;
+  return { leaveBalance, weeklyHours, lastPayslip };
+}
 async function dashboard(user, query = {}, options = {}) {
   const { company } = await settings();
   const now = options.now ? new Date(options.now) : new Date();
@@ -22,22 +199,19 @@ async function dashboard(user, query = {}, options = {}) {
     );
     Object.assign(filter, departmentFilter);
   }
-  const selected = await M.Employee.find(filter).select("_id").lean();
-  const ids = selected.map((e) => e._id);
+  const selected = await models.Employee.find(filter).select("_id").lean();
+  const ids = selected.map((employee) => employee._id);
   const records = await board(
     user,
-    {
-      start,
-      end,
-      department: query.department,
-    },
+    { start, end, department: query.department },
     undefined,
     { now },
   );
-  const count = (status) => records.filter((r) => r.status === status).length;
+  const count = (status) =>
+    records.filter((record) => record.status === status).length;
   const onLeave = count("on_leave"),
     absent = count("absent"),
-    late = records.filter((r) => r.late).length;
+    late = records.filter((record) => record.late).length;
   const denominator = records.length - onLeave;
   const weighted =
     count("present") +
@@ -53,10 +227,8 @@ async function dashboard(user, query = {}, options = {}) {
       { exitDate: { $gt: end } },
     ],
   };
-  const [headcount] = await M.Employee.aggregate([
-    {
-      $match: snapshotFilter,
-    },
+  const [headcount] = await models.Employee.aggregate([
+    { $match: snapshotFilter },
     {
       $group: {
         _id: null,
@@ -65,7 +237,7 @@ async function dashboard(user, query = {}, options = {}) {
       },
     },
   ]);
-  const byDepartment = await M.Employee.aggregate([
+  const byDepartment = await models.Employee.aggregate([
     { $match: snapshotFilter },
     {
       $group: {
@@ -91,7 +263,7 @@ async function dashboard(user, query = {}, options = {}) {
       },
     },
   ]);
-  const byDesignation = await M.Employee.aggregate([
+  const byDesignation = await models.Employee.aggregate([
     { $match: snapshotFilter },
     {
       $group: {
@@ -117,11 +289,11 @@ async function dashboard(user, query = {}, options = {}) {
       },
     },
   ]);
-  const gender = await M.Employee.aggregate([
+  const gender = await models.Employee.aggregate([
     { $match: snapshotFilter },
     { $group: { _id: "$gender", count: { $sum: 1 } } },
   ]);
-  const tenure = await M.Employee.aggregate([
+  const tenure = await models.Employee.aggregate([
     { $match: snapshotFilter },
     {
       $project: {
@@ -147,7 +319,7 @@ async function dashboard(user, query = {}, options = {}) {
       },
     },
   ]);
-  const payroll = await M.Payroll.aggregate([
+  const payroll = await models.Payroll.aggregate([
     {
       $match: {
         month: { $gte: start.slice(0, 7), $lte: end.slice(0, 7) },
@@ -164,7 +336,7 @@ async function dashboard(user, query = {}, options = {}) {
       },
     },
   ]);
-  const approvedLeaves = await M.Leave.find({
+  const approvedLeaves = await models.Leave.find({
     employee: { $in: ids },
     status: "approved",
     start: { $lte: end },
@@ -172,77 +344,14 @@ async function dashboard(user, query = {}, options = {}) {
   })
     .populate("type")
     .lean();
-  const leaveMap = new Map();
-  for (const l of approvedLeaves) {
-    const name = l.type?.name || "Unknown type";
-    const employee = await M.Employee.findById(l.employee)
-      .populate("department", "name")
-      .lean();
-    const department = employee?.department?.name || "Unassigned";
-    const key = `${name}:${department}`;
-    const entry = leaveMap.get(key) || {
-      name,
-      department,
-      approvedDays: 0,
-      quota: l.type?.unpaid ? null : l.type?.quota || 0,
-    };
-    entry.approvedDays += l.days.filter((d) => d >= start && d <= end).length;
-    leaveMap.set(key, entry);
-  }
-  const departmentCounts = new Map(byDepartment.map((d) => [d.name, d.count]));
-  const leaveUtilization = [...leaveMap.values()].map((l) => ({
-    ...l,
-    utilization:
-      l.quota && departmentCounts.get(l.department)
-        ? round(
-            (l.approvedDays / (l.quota * departmentCounts.get(l.department))) *
-              100,
-          )
-        : null,
-  }));
-  const lateMap = new Map(),
-    trendMap = new Map(),
-    departmentMap = new Map();
-  for (const r of records) {
-    if (r.late) {
-      const old = lateMap.get(String(r.employee._id)) || {
-        name: r.employee.name,
-        code: r.employee.code,
-        count: 0,
-      };
-      old.count++;
-      lateMap.set(String(r.employee._id), old);
-    }
-    const trend = trendMap.get(r.date) || {
-      date: r.date,
-      present: 0,
-      late: 0,
-      absent: 0,
-      onLeave: 0,
-    };
-    if (["present", "late", "missing_checkout", "half_day"].includes(r.status))
-      trend.present += r.status === "half_day" ? 0.5 : 1;
-    if (r.late) trend.late++;
-    if (r.status === "absent") trend.absent++;
-    if (r.status === "on_leave") trend.onLeave++;
-    trendMap.set(r.date, trend);
-    const name = r.employee.department?.name || "Unassigned";
-    const dep = departmentMap.get(name) || {
-      name,
-      expectedDays: 0,
-      absent: 0,
-      late: 0,
-      presentOrLate: 0,
-      leaveDays: 0,
-    };
-    dep.expectedDays++;
-    if (r.status === "absent") dep.absent++;
-    if (r.late) dep.late++;
-    if (["present", "late"].includes(r.status)) dep.presentOrLate++;
-    if (r.status === "on_leave") dep.leaveDays++;
-    departmentMap.set(name, dep);
-  }
-  const startCount = await M.Employee.countDocuments({
+  const leaveUtilization = await summarizeLeaveUsage(
+    approvedLeaves,
+    byDepartment,
+    start,
+    end,
+  );
+  const { lateMap, trendMap, departmentMap } = summarizeAttendanceRows(records);
+  const startCount = await models.Employee.countDocuments({
     ...employeeScope(user),
     ...departmentFilter,
     joinDate: { $lte: start },
@@ -253,16 +362,13 @@ async function dashboard(user, query = {}, options = {}) {
       { exitDate: { $gte: start } },
     ],
   });
-  const exits = await M.Employee.countDocuments({
+  const exits = await models.Employee.countDocuments({
     ...filter,
     exitDate: { $gte: start, $lte: end },
   });
   const yearStart = `${end.slice(0, 4)}-01-01`;
-  const ytdFilter = {
-    ...employeeScope(user),
-    ...departmentFilter,
-  };
-  const ytdStartCount = await M.Employee.countDocuments({
+  const ytdFilter = { ...employeeScope(user), ...departmentFilter };
+  const ytdStartCount = await models.Employee.countDocuments({
     ...ytdFilter,
     joinDate: { $lte: yearStart },
     $or: [
@@ -272,7 +378,7 @@ async function dashboard(user, query = {}, options = {}) {
       { exitDate: { $gte: yearStart } },
     ],
   });
-  const ytdExits = await M.Employee.countDocuments({
+  const ytdExits = await models.Employee.countDocuments({
     ...ytdFilter,
     exitDate: { $gte: yearStart, $lte: end },
   });
@@ -285,21 +391,17 @@ async function dashboard(user, query = {}, options = {}) {
   const pending =
     user.role === "employee"
       ? 0
-      : (await M.Leave.countDocuments({
+      : (await models.Leave.countDocuments({
           employee: { $in: ids },
           status: "pending",
         })) +
-        (await M.Correction.countDocuments({
+        (await models.Correction.countDocuments({
           employee: { $in: ids },
           status: "pending",
         }));
   const todayRows = await board(
     user,
-    {
-      start: asOf,
-      end: asOf,
-      department: query.department,
-    },
+    { start: asOf, end: asOf, department: query.department },
     undefined,
     { now },
   );
@@ -322,13 +424,20 @@ async function dashboard(user, query = {}, options = {}) {
     lateCount: late,
     onLeave,
     pendingApprovals: pending,
-    presentToday: todayRows.filter((r) =>
-      ["present", "late", "half_day", "missing_checkout"].includes(r.status),
+    presentToday: todayRows.filter((record) =>
+      ["present", "late", "half_day", "missing_checkout"].includes(
+        record.status,
+      ),
     ).length,
-    onLeaveToday: todayRows.filter((r) => r.status === "on_leave").length,
-    lateToday: todayRows.filter((r) => r.late).length,
-    payrollGross: round(payroll.reduce((n, p) => n + p.gross, 0)),
-    payrollNet: round(payroll.reduce((n, p) => n + p.net, 0)),
+    onLeaveToday: todayRows.filter((record) => record.status === "on_leave")
+      .length,
+    lateToday: todayRows.filter((record) => record.late).length,
+    payrollGross: round(
+      payroll.reduce((total, payrollRow) => total + payrollRow.gross, 0),
+    ),
+    payrollNet: round(
+      payroll.reduce((total, payrollRow) => total + payrollRow.net, 0),
+    ),
     payroll,
     byDepartment,
     byDesignation,
@@ -336,109 +445,29 @@ async function dashboard(user, query = {}, options = {}) {
     tenure,
     leaveUtilization,
     trend: [...trendMap.values()],
-    departmentAttendance: [...departmentMap.values()].map((d) => ({
-      ...d,
-      absenteeism: round((d.absent / d.expectedDays) * 100),
-      latePercent: d.presentOrLate
-        ? round((d.late / d.presentOrLate) * 100)
+    departmentAttendance: [...departmentMap.values()].map((department) => ({
+      ...department,
+      absenteeism: round((department.absent / department.expectedDays) * 100),
+      latePercent: department.presentOrLate
+        ? round((department.late / department.presentOrLate) * 100)
         : 0,
     })),
     topLateComers: [...lateMap.values()]
-      .sort((a, b) => b.count - a.count)
+      .sort((left, right) => right.count - left.count)
       .slice(0, 5),
   };
   if (["admin", "hr"].includes(user.role)) {
-    // These operational counters describe the current company, independently
-    // of the historical reporting range/department filters above.
-    const companyFilter = { company: company._id };
-    const [
-      totalEmployees,
-      activeEmployees,
-      totalDepartments,
-      totalHrUsers,
-      activeHrUsers,
-      pendingLeaveRequests,
-      currentRows,
-    ] = await Promise.all([
-      M.Employee.countDocuments(companyFilter),
-      M.Employee.countDocuments({
-        ...companyFilter,
-        joinDate: { $lte: asOf },
-        $or: [
-          { exitDate: { $exists: false } },
-          { exitDate: "" },
-          { exitDate: null },
-          { exitDate: { $gt: asOf } },
-        ],
-      }),
-      M.Department.countDocuments(companyFilter),
-      M.User.countDocuments({ ...companyFilter, role: "hr" }),
-      M.User.countDocuments({ ...companyFilter, role: "hr", active: true }),
-      M.Leave.countDocuments({ ...companyFilter, status: "pending" }),
-      query.department
-        ? board(user, { start: asOf, end: asOf }, undefined, { now })
-        : Promise.resolve(todayRows),
-    ]);
-    result.companySummary = {
-      date: asOf,
-      totalEmployees,
-      activeEmployees,
-      totalDepartments,
-      totalHrUsers,
-      activeHrUsers,
-      presentEmployees: currentRows.filter((row) =>
-        ["present", "late", "half_day", "missing_checkout"].includes(
-          row.status,
-        ),
-      ).length,
-      absentEmployees: currentRows.filter((row) => row.status === "absent")
-        .length,
-      onLeaveEmployees: currentRows.filter((row) => row.status === "on_leave")
-        .length,
-      lateEmployees: currentRows.filter((row) => row.late).length,
-      pendingLeaveRequests,
-      todayAttendance: currentRows.map((row) => ({
-        employee: row.employee,
-        date: row.date,
-        status: row.status,
-        checkIn: row.checkIn || null,
-        checkOut: row.checkOut || null,
-        hours: row.hours,
-        late: row.late,
-        verificationMethod: row.verificationMethod || null,
-      })),
-    };
+    result.companySummary = await loadCompanySummary(
+      user,
+      company,
+      asOf,
+      now,
+      query,
+      todayRows,
+    );
   }
   if (user.employee) {
-    result.leaveBalance = await balances(user);
-    const weekStart = new Date(`${asOf}T00:00:00.000Z`);
-    weekStart.setUTCDate(
-      weekStart.getUTCDate() - ((weekStart.getUTCDay() + 6) % 7),
-    );
-    const hours = await M.Attendance.aggregate([
-      {
-        $match: {
-          employee: user.employee,
-          date: { $gte: weekStart.toISOString().slice(0, 10), $lte: asOf },
-        },
-      },
-      { $group: { _id: null, hours: { $sum: "$hours" } } },
-    ]);
-    result.weeklyHours = round(hours[0]?.hours || 0);
-    const last = await M.Payroll.findOne({
-      status: "finalized",
-      "slips.employee": user.employee,
-    })
-      .sort({ month: -1 })
-      .lean();
-    result.lastPayslip = last
-      ? {
-          month: last.month,
-          net: last.slips.find(
-            (s) => String(s.employee) === String(user.employee),
-          )?.net,
-        }
-      : null;
+    Object.assign(result, await loadEmployeeSummary(user, asOf));
   }
   if (user.role === "employee") {
     // Self-service never receives company-wide grouping or other salary data.

@@ -1,4 +1,4 @@
-const M = require("../models");
+const models = require("../models");
 const { workingDays, attendanceStatus } = require("./rules");
 const { settings, range, employeeScope } = require("./context");
 const { businessDate } = require("./attendanceWriter");
@@ -13,18 +13,18 @@ async function board(user, query = {}, session, options = {}) {
   const { start, end } = range({ ...query, end: query.end || asOf });
   const filter = { ...employeeScope(user), joinDate: { $lte: end } };
   if (query.department) filter.department = query.department;
-  const employees = await M.Employee.find(filter)
+  const employees = await models.Employee.find(filter)
     .populate("department designation")
     .session(session || null)
     .lean();
-  const ids = employees.map((e) => e._id);
-  const records = await M.Attendance.find({
+  const ids = employees.map((employee) => employee._id);
+  const records = await models.Attendance.find({
     employee: { $in: ids },
     date: { $gte: start, $lte: end },
   })
     .session(session || null)
     .lean();
-  const leaves = await M.Leave.find({
+  const leaves = await models.Leave.find({
     employee: { $in: ids },
     status: "approved",
     start: { $lte: end },
@@ -32,7 +32,9 @@ async function board(user, query = {}, session, options = {}) {
   })
     .session(session || null)
     .lean();
-  const byKey = new Map(records.map((r) => [`${r.employee}:${r.date}`, r]));
+  const byKey = new Map(
+    records.map((record) => [`${record.employee}:${record.date}`, record]),
+  );
   const recordDatesByEmployee = new Map(),
     leavesByEmployee = new Map();
   for (const record of records) {
@@ -57,8 +59,8 @@ async function board(user, query = {}, session, options = {}) {
       ...new Set([
         ...workingDates,
         ...employeeRecordDates,
-        ...employeeLeaves.flatMap((l) =>
-          l.days.filter((date) => date >= start && date <= end),
+        ...employeeLeaves.flatMap((leave) =>
+          leave.days.filter((date) => date >= start && date <= end),
         ),
       ]),
     ].sort();
@@ -70,7 +72,7 @@ async function board(user, query = {}, session, options = {}) {
       )
         continue;
       const row = byKey.get(`${employee._id}:${date}`);
-      const leave = employeeLeaves.find((l) => l.days.includes(date));
+      const leave = employeeLeaves.find((leave) => leave.days.includes(date));
       result.push({
         ...(row || {}),
         employee: {

@@ -3,7 +3,7 @@ const helmet = require("helmet");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const { rateLimit } = require("express-rate-limit");
-const { ZodError } = require("zod");
+const errorHandler = require("./middleware/errorHandler");
 const { trustProxy, frontendOrigins } = require("./config/httpConfiguration");
 const app = express();
 app.disable("x-powered-by");
@@ -43,45 +43,5 @@ app.use("/api", require("./routes"));
 app.use((req, res) =>
   res.status(404).json({ message: "API endpoint not found." }),
 );
-app.use((error, req, res, next) => {
-  if (res.headersSent) return next(error);
-  if (error.type === "entity.parse.failed")
-    return res
-      .status(400)
-      .json({ message: "Request body must contain valid JSON." });
-  if (error instanceof ZodError)
-    return res.status(422).json({
-      message: "Check the form fields.",
-      details: error.issues.map((i) => ({
-        field: i.path.join("."),
-        reason: i.message,
-      })),
-    });
-  if (error.code === 11000)
-    return res
-      .status(409)
-      .json({ message: "A record with this unique value already exists." });
-  if (
-    error.name === "CastError" ||
-    error.name === "StrictModeError" ||
-    error.name === "ValidationError"
-  )
-    return res.status(422).json({ message: "Invalid record fields." });
-  if (error.message?.includes("Transaction numbers are only allowed"))
-    return res.status(503).json({
-      message: "MongoDB must run as a replica set to support atomic workflows.",
-    });
-  const status = error.status || 500;
-  if (status >= 500)
-    console.error("API failure:", error.name, error.code || status);
-  res.status(status).json({
-    message:
-      status === 500 ? "An unexpected server error occurred." : error.message,
-    ...(error.details ? { details: error.details } : {}),
-    ...(typeof error.code === "string" &&
-    /^(?:AI_|AUTH_|BIOMETRIC_)/.test(error.code)
-      ? { code: error.code }
-      : {}),
-  });
-});
+app.use(errorHandler);
 module.exports = app;

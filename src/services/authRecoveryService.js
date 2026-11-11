@@ -1,17 +1,15 @@
 const crypto = require("node:crypto");
 const bcrypt = require("bcryptjs");
 const nodemailer = require("nodemailer");
-const M = require("../models");
-const C = require("./context");
+const models = require("../models");
+const context = require("./context");
 const ApiError = require("../utils/ApiError");
 const { withCompany } = require("./companyContext");
-
 const RESET_LIFETIME_MS = 15 * 60000;
 const acceptedMessage =
   "If an active account exists for that email, password-reset instructions will be sent. Check your inbox and spam folder, or contact your company administrator.";
 const digest = (token) =>
   crypto.createHash("sha256").update(token).digest("hex");
-
 function deliveryConfiguration() {
   const host = process.env.SMTP_HOST?.trim();
   const from = process.env.SMTP_FROM?.trim();
@@ -55,7 +53,6 @@ function deliveryConfiguration() {
   }
   return { host, from, port, secure, user, pass, appUrl };
 }
-
 function transportFor(config) {
   return nodemailer.createTransport({
     host: config.host,
@@ -71,7 +68,6 @@ function transportFor(config) {
     tls: { rejectUnauthorized: true },
   });
 }
-
 async function requestReset(email) {
   const config = deliveryConfiguration();
   const transport = transportFor(config);
@@ -85,15 +81,14 @@ async function requestReset(email) {
       "Password recovery email delivery is unavailable. Try again later or contact your company administrator.",
     );
   }
-  const user = await M.User.findOne({ email, active: true }).lean();
+  const user = await models.User.findOne({ email, active: true }).lean();
   if (!user?.company) return { message: acceptedMessage };
-
   const token = crypto.randomBytes(32).toString("hex");
   const tokenHash = digest(token);
   const expiresAt = new Date(Date.now() + RESET_LIFETIME_MS);
   await withCompany(user.company, () =>
-    C.transaction(async (session) => {
-      await M.PasswordResetToken.findOneAndUpdate(
+    context.transaction(async (session) => {
+      await models.PasswordResetToken.findOneAndUpdate(
         { user: user._id },
         {
           tokenHash,
@@ -103,9 +98,14 @@ async function requestReset(email) {
         },
         { upsert: true, returnDocument: "after", runValidators: true, session },
       );
-      await C.audit(session, user, "password_reset_requested", "User", null, {
-        _id: user._id,
-      });
+      await context.audit(
+        session,
+        user,
+        "password_reset_requested",
+        "User",
+        null,
+        { _id: user._id },
+      );
     }),
   );
   const resetUrl = new URL("/reset-password", config.appUrl);
@@ -119,14 +119,14 @@ async function requestReset(email) {
     });
     if (!delivery.accepted?.length) throw new Error("Recipient not accepted");
     await withCompany(user.company, () =>
-      M.PasswordResetToken.updateOne(
+      models.PasswordResetToken.updateOne(
         { user: user._id, tokenHash },
         { deliveredAt: new Date() },
       ),
     );
   } catch {
     await withCompany(user.company, () =>
-      M.PasswordResetToken.deleteOne({ user: user._id, tokenHash }),
+      models.PasswordResetToken.deleteOne({ user: user._id, tokenHash }),
     );
     throw new ApiError(
       503,
@@ -135,10 +135,9 @@ async function requestReset(email) {
   }
   return { message: acceptedMessage };
 }
-
 async function completeReset(token, password) {
   const tokenHash = digest(token);
-  const reset = await M.PasswordResetToken.findOne({
+  const reset = await models.PasswordResetToken.findOne({
     tokenHash,
     expiresAt: { $gt: new Date() },
     deliveredAt: { $ne: null },
@@ -153,8 +152,8 @@ async function completeReset(token, password) {
   // hold locks. Conditional user/token updates prevent reuse and stale resets.
   const passwordHash = await bcrypt.hash(password, 12);
   return withCompany(reset.company, () =>
-    C.transaction(async (session) => {
-      const claimed = await M.PasswordResetToken.findOneAndDelete(
+    context.transaction(async (session) => {
+      const claimed = await models.PasswordResetToken.findOneAndDelete(
         {
           _id: reset._id,
           tokenHash,
@@ -164,7 +163,7 @@ async function completeReset(token, password) {
         { session },
       );
       if (!claimed) throw invalid();
-      const user = await M.User.findOneAndUpdate(
+      const user = await models.User.findOneAndUpdate(
         { _id: reset.user, active: true, tokenVersion: reset.userTokenVersion },
         {
           passwordHash,
@@ -175,12 +174,16 @@ async function completeReset(token, password) {
         { returnDocument: "after", session, runValidators: true },
       );
       if (!user) throw invalid();
-      await C.audit(session, user, "password_reset_completed", "User", null, {
-        _id: user._id,
-      });
+      await context.audit(
+        session,
+        user,
+        "password_reset_completed",
+        "User",
+        null,
+        { _id: user._id },
+      );
       return user;
     }),
   );
 }
-
 module.exports = { requestReset, completeReset, RESET_LIFETIME_MS };

@@ -1,4 +1,4 @@
-const M = require("../models");
+const models = require("../models");
 const { withCompany } = require("./companyContext");
 function startBiometricRetention() {
   let running = false;
@@ -6,7 +6,7 @@ function startBiometricRetention() {
     if (running) return;
     running = true;
     try {
-      const companies = await M.Company.find().select("_id").lean();
+      const companies = await models.Company.find().select("_id").lean();
       for (const company of companies) {
         await withCompany(company._id, () =>
           require("./biometricService").cleanupCompany(company._id),

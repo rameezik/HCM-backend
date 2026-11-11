@@ -1,9 +1,12 @@
-const M = require("../models");
-const C = require("./context");
+const models = require("../models");
+const context = require("./context");
 const ApiError = require("../utils/ApiError");
-const provider = require("./localFaceProvider");
-const biometrics = require("./biometricService");
-const recognition = require("./kioskRecognitionService");
+const faceProvider = require("./localFaceProvider");
+const {
+  CONSENT_VERSION: PRIVATE_CONSENT_VERSION,
+} = require("./biometricService");
+const { protectTemplate, revealTemplate } = require("./biometricTemplate");
+const terminalRecognition = require("./kioskRecognitionService");
 
 const CONSENT_VERSION = "2026-11-11-terminal-photo-v1";
 const CONSENT_NOTICE =
@@ -17,7 +20,7 @@ const sameDate = (left, right) =>
 async function lockAdmin(user, session) {
   if (user.role !== "admin" || !user.company)
     throw new ApiError(403, "Only Admin can manage face attendance.");
-  const actor = await M.User.findOneAndUpdate(
+  const actor = await models.User.findOneAndUpdate(
     {
       _id: user._id,
       company: user.company,
@@ -32,7 +35,7 @@ async function lockAdmin(user, session) {
 }
 
 async function employeeAccount(user, employeeId, session) {
-  const employee = await M.Employee.findOne({
+  const employee = await models.Employee.findOne({
     _id: employeeId,
     company: user.company,
     status: { $ne: "exited" },
@@ -40,7 +43,7 @@ async function employeeAccount(user, employeeId, session) {
     .select("+photo")
     .session(session || null);
   if (!employee) throw new ApiError(404, "Active employee not found.");
-  const account = await M.User.findOne({
+  const account = await models.User.findOne({
     _id: employee.user,
     employee: employee._id,
     company: user.company,
@@ -60,15 +63,15 @@ function enrollmentState(employee, account, enrollment) {
   if (!enrollment?.kioskEnabled) return "not_enabled";
   if (
     enrollment.status !== "active" ||
-    enrollment.provider !== provider.PROVIDER
+    enrollment.provider !== faceProvider.PROVIDER
   )
     return "not_enabled";
   if (enrollment.expiresAt <= new Date()) return "expired";
   if (!sameDate(enrollment.kioskPhotoUpdatedAt, employee.photoUpdatedAt))
     return "photo_changed";
   if (
-    enrollment.modelVersion !== provider.MODEL_VERSION ||
-    enrollment.kioskConsentVersion !== recognition.CONSENT_VERSION
+    enrollment.modelVersion !== faceProvider.MODEL_VERSION ||
+    enrollment.kioskConsentVersion !== terminalRecognition.CONSENT_VERSION
   )
     return "not_enabled";
   return "ready";
@@ -83,20 +86,20 @@ async function listEmployees(user, { search = "", page = 1, limit = 50 } = {}) {
     }));
   }
   const [employees, total] = await Promise.all([
-    M.Employee.find(filter)
+    models.Employee.find(filter)
       .select("name code email user photoUpdatedAt status")
       .sort({ name: 1, _id: 1 })
       .skip((page - 1) * limit)
       .limit(limit)
       .lean(),
-    M.Employee.countDocuments(filter),
+    models.Employee.countDocuments(filter),
   ]);
   const ids = employees.map((employee) => employee._id);
   const [accounts, enrollments] = await Promise.all([
-    M.User.find({ company: user.company, employee: { $in: ids } })
+    models.User.find({ company: user.company, employee: { $in: ids } })
       .select("_id employee active")
       .lean(),
-    M.BiometricEnrollment.find({
+    models.BiometricEnrollment.find({
       company: user.company,
       employee: { $in: ids },
     }).lean(),
@@ -107,7 +110,7 @@ async function listEmployees(user, { search = "", page = 1, limit = 50 } = {}) {
   const enrollmentByEmployee = new Map(
     enrollments.map((enrollment) => [String(enrollment.employee), enrollment]),
   );
-  const readiness = recognition.configuration();
+  const readiness = terminalRecognition.configuration();
   return {
     employees: employees.map((employee) => {
       const account = accountByEmployee.get(String(employee._id));
@@ -141,143 +144,188 @@ async function listEmployees(user, { search = "", page = 1, limit = 50 } = {}) {
   };
 }
 
+async function lockPhotoEnrollment(user, employeeId, snapshot, session) {
+  await lockAdmin(user, session);
+  const company = await models.Company.findOneAndUpdate(
+    { _id: user.company },
+    { $inc: { __v: 1 } },
+    { session, returnDocument: "after" },
+  );
+  const { employee, account } = await employeeAccount(
+    user,
+    employeeId,
+    session,
+  );
+  if (
+    !sameDate(snapshot.employee.photoUpdatedAt, employee.photoUpdatedAt) ||
+    snapshot.account.tokenVersion !== account.tokenVersion
+  )
+    throw new ApiError(
+      409,
+      "The employee photo or account changed. Try again.",
+    );
+  await models.Employee.updateOne(
+    {
+      _id: employee._id,
+      company: user.company,
+      photoUpdatedAt: employee.photoUpdatedAt,
+    },
+    { $inc: { __v: 1 } },
+    { session },
+  );
+  await models.User.updateOne(
+    {
+      _id: account._id,
+      company: user.company,
+      active: true,
+      tokenVersion: account.tokenVersion,
+    },
+    { $inc: { __v: 1 } },
+    { session },
+  );
+  return { company, employee };
+}
+
+async function rejectDuplicatePhoto(
+  user,
+  employee,
+  embedding,
+  threshold,
+  session,
+) {
+  const others = await models.BiometricEnrollment.find({
+    company: user.company,
+    employee: { $ne: employee._id },
+    provider: faceProvider.PROVIDER,
+    status: "active",
+    expiresAt: { $gt: new Date() },
+  })
+    .select("+protectedTemplate")
+    .session(session);
+  for (const other of others) {
+    const template = revealTemplate(
+      other.protectedTemplate,
+      user.company,
+      other.employee,
+    );
+    try {
+      if (
+        template.modelVersion === faceProvider.MODEL_VERSION &&
+        faceProvider.compare(template.embedding, embedding) >= threshold
+      )
+        throw new ApiError(
+          409,
+          "This face is already registered to another employee. Check the profile photos.",
+        );
+    } finally {
+      template.embedding.fill(0);
+    }
+  }
+}
+
+async function savePhotoTemplate(
+  user,
+  employee,
+  company,
+  embedding,
+  config,
+  session,
+) {
+  const existing = await models.BiometricEnrollment.findOne({
+    company: user.company,
+    employee: employee._id,
+  }).session(session);
+  if (
+    existing &&
+    (existing.provider !== faceProvider.PROVIDER ||
+      existing.status !== "active")
+  )
+    throw new ApiError(
+      409,
+      "Delete the previous face enrollment before enabling attendance.",
+    );
+  const now = new Date();
+  const days = Math.min(
+    config.retentionDays,
+    Math.max(1, Math.min(365, company.biometricRetentionDays || 365)),
+  );
+  const expiresAt = new Date(now.getTime() + days * 86400000);
+  const values = {
+    provider: faceProvider.PROVIDER,
+    modelVersion: faceProvider.MODEL_VERSION,
+    status: "active",
+    protectedTemplate: protectTemplate(
+      {
+        provider: faceProvider.PROVIDER,
+        modelVersion: faceProvider.MODEL_VERSION,
+        embedding,
+      },
+      user.company,
+      employee._id,
+    ),
+    consentAt: now,
+    consentVersion: PRIVATE_CONSENT_VERSION,
+    enrolledAt: now,
+    expiresAt,
+    kioskEnabled: true,
+    kioskConsentAt: now,
+    kioskConsentVersion: terminalRecognition.CONSENT_VERSION,
+    kioskPhotoUpdatedAt: employee.photoUpdatedAt,
+    terminalEnrollmentSource: "profile-photo",
+    terminalConsentVersion: CONSENT_VERSION,
+    terminalConsentRecordedBy: user._id,
+  };
+  const enrollment = existing
+    ? await models.BiometricEnrollment.findOneAndUpdate(
+        { _id: existing._id, company: user.company },
+        { $set: values },
+        { session, returnDocument: "after", runValidators: true },
+      )
+    : (
+        await models.BiometricEnrollment.create(
+          [{ company: user.company, employee: employee._id, ...values }],
+          { session },
+        )
+      )[0];
+  return { enrollment, expiresAt };
+}
+
 async function enable(user, employeeId, consent) {
   if (consent.consent !== true || consent.consentVersion !== CONSENT_VERSION)
     throw new ApiError(
       422,
       "Confirm the employee's current permission before enabling face attendance.",
     );
-  const config = recognition.requireConfiguration();
+  const config = terminalRecognition.requireConfiguration();
   const snapshot = await employeeAccount(user, employeeId);
-  const extracted = await provider.extractSamples([
+  const extracted = await faceProvider.extractSamples([
     snapshot.employee.photo.toString("base64"),
   ]);
   const embedding = extracted.embeddings[0];
   try {
-    return await C.transaction(async (session) => {
-      await lockAdmin(user, session);
-      const company = await M.Company.findOneAndUpdate(
-        { _id: user.company },
-        { $inc: { __v: 1 } },
-        { session, returnDocument: "after" },
-      );
-      const { employee, account } = await employeeAccount(
+    return await context.transaction(async (session) => {
+      const { company, employee } = await lockPhotoEnrollment(
         user,
         employeeId,
+        snapshot,
         session,
       );
-      if (
-        !sameDate(snapshot.employee.photoUpdatedAt, employee.photoUpdatedAt) ||
-        snapshot.account.tokenVersion !== account.tokenVersion
-      )
-        throw new ApiError(
-          409,
-          "The employee photo or account changed. Try again.",
-        );
-      await M.Employee.updateOne(
-        {
-          _id: employee._id,
-          company: user.company,
-          photoUpdatedAt: employee.photoUpdatedAt,
-        },
-        { $inc: { __v: 1 } },
-        { session },
+      await rejectDuplicatePhoto(
+        user,
+        employee,
+        embedding,
+        config.threshold,
+        session,
       );
-      await M.User.updateOne(
-        {
-          _id: account._id,
-          company: user.company,
-          active: true,
-          tokenVersion: account.tokenVersion,
-        },
-        { $inc: { __v: 1 } },
-        { session },
+      const { enrollment, expiresAt } = await savePhotoTemplate(
+        user,
+        employee,
+        company,
+        embedding,
+        config,
+        session,
       );
-      const others = await M.BiometricEnrollment.find({
-        company: user.company,
-        employee: { $ne: employee._id },
-        provider: provider.PROVIDER,
-        status: "active",
-        expiresAt: { $gt: new Date() },
-      })
-        .select("+protectedTemplate")
-        .session(session);
-      for (const other of others) {
-        const template = biometrics.revealTemplate(
-          other.protectedTemplate,
-          user.company,
-          other.employee,
-        );
-        try {
-          if (
-            template.modelVersion === provider.MODEL_VERSION &&
-            provider.compare(template.embedding, embedding) >= config.threshold
-          )
-            throw new ApiError(
-              409,
-              "This face is already registered to another employee. Check the profile photos.",
-            );
-        } finally {
-          template.embedding.fill(0);
-        }
-      }
-      const existing = await M.BiometricEnrollment.findOne({
-        company: user.company,
-        employee: employee._id,
-      }).session(session);
-      if (
-        existing &&
-        (existing.provider !== provider.PROVIDER ||
-          existing.status !== "active")
-      )
-        throw new ApiError(
-          409,
-          "Delete the previous face enrollment before enabling attendance.",
-        );
-      const now = new Date();
-      const days = Math.min(
-        config.retentionDays,
-        Math.max(1, Math.min(365, company.biometricRetentionDays || 365)),
-      );
-      const expiresAt = new Date(now.getTime() + days * 86400000);
-      const values = {
-        provider: provider.PROVIDER,
-        modelVersion: provider.MODEL_VERSION,
-        status: "active",
-        protectedTemplate: biometrics.protectTemplate(
-          {
-            provider: provider.PROVIDER,
-            modelVersion: provider.MODEL_VERSION,
-            embedding,
-          },
-          user.company,
-          employee._id,
-        ),
-        consentAt: now,
-        consentVersion: biometrics.CONSENT_VERSION,
-        enrolledAt: now,
-        expiresAt,
-        kioskEnabled: true,
-        kioskConsentAt: now,
-        kioskConsentVersion: recognition.CONSENT_VERSION,
-        kioskPhotoUpdatedAt: employee.photoUpdatedAt,
-        terminalEnrollmentSource: "profile-photo",
-        terminalConsentVersion: CONSENT_VERSION,
-        terminalConsentRecordedBy: user._id,
-      };
-      const enrollment = existing
-        ? await M.BiometricEnrollment.findOneAndUpdate(
-            { _id: existing._id, company: user.company },
-            { $set: values },
-            { session, returnDocument: "after", runValidators: true },
-          )
-        : (
-            await M.BiometricEnrollment.create(
-              [{ company: user.company, employee: employee._id, ...values }],
-              { session },
-            )
-          )[0];
-      await M.KioskEnrollmentGrant.updateMany(
+      await models.KioskEnrollmentGrant.updateMany(
         {
           company: user.company,
           employee: employee._id,
@@ -286,7 +334,7 @@ async function enable(user, employeeId, consent) {
         { state: "revoked", failureCode: "profile_photo_enabled" },
         { session },
       );
-      await C.audit(
+      await context.audit(
         session,
         user,
         "terminal_face_enabled",
@@ -317,24 +365,24 @@ async function enable(user, employeeId, consent) {
 }
 
 async function disable(user, employeeId) {
-  return C.transaction(async (session) => {
+  return context.transaction(async (session) => {
     await lockAdmin(user, session);
-    const employee = await M.Employee.findOne({
+    const employee = await models.Employee.findOne({
       _id: employeeId,
       company: user.company,
     }).session(session);
     if (!employee) throw new ApiError(404, "Employee not found.");
-    const enrollment = await M.BiometricEnrollment.findOne({
+    const enrollment = await models.BiometricEnrollment.findOne({
       company: user.company,
       employee: employeeId,
     }).session(session);
     if (enrollment?.terminalEnrollmentSource === "profile-photo") {
-      await M.BiometricEnrollment.deleteOne(
+      await models.BiometricEnrollment.deleteOne(
         { _id: enrollment._id, company: user.company },
         { session },
       );
     } else if (enrollment) {
-      await M.BiometricEnrollment.updateOne(
+      await models.BiometricEnrollment.updateOne(
         { _id: enrollment._id, company: user.company },
         {
           $set: { kioskEnabled: false },
@@ -349,7 +397,7 @@ async function disable(user, employeeId) {
         { session },
       );
     }
-    await M.KioskEnrollmentGrant.updateMany(
+    await models.KioskEnrollmentGrant.updateMany(
       {
         company: user.company,
         employee: employee._id,
@@ -358,7 +406,7 @@ async function disable(user, employeeId) {
       { state: "revoked", failureCode: "consent_withdrawn" },
       { session },
     );
-    await C.audit(
+    await context.audit(
       session,
       user,
       "terminal_face_disabled",

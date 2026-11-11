@@ -1,5 +1,7 @@
 # HCM Lite Backend
 
+[Code guide](docs/code-guide.md): where routes, models and business logic live.
+
 ## Attendance Terminal
 
 Admin can enable face attendance from an employee's saved profile photo after recording permission. Employees then use a company terminal link without signing in. The server performs local YuNet/SFace matching and records attendance in MongoDB; unmatched scans return **Record not found**.

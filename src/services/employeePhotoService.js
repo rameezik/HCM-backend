@@ -1,14 +1,12 @@
 const sharp = require("sharp");
-const M = require("../models");
-const C = require("./context");
+const models = require("../models");
+const context = require("./context");
 const ApiError = require("../utils/ApiError");
-
 const MAX_INPUT_BYTES = 400000;
 const MAX_ENCODED_CHARACTERS = 600000;
 const MAX_PIXELS = 16000000;
 const MAX_EDGE = 512;
 let processing = 0;
-
 async function normalizePhoto(dataUrl) {
   if (typeof dataUrl !== "string" || dataUrl.length > MAX_ENCODED_CHARACTERS)
     throw new ApiError(422, "Choose a JPEG, PNG or WebP photo under 400 KB.");
@@ -95,11 +93,10 @@ async function normalizePhoto(dataUrl) {
     input.fill(0);
   }
 }
-
 async function employeeFor(user, employeeId, session, writing = false) {
-  const row = await M.Employee.findOne({
+  const row = await models.Employee.findOne({
     company: user.company,
-    $and: [{ _id: employeeId }, C.employeeScope(user)],
+    $and: [{ _id: employeeId }, context.employeeScope(user)],
   })
     .select("_id user photoUpdatedAt")
     .session(session || null);
@@ -113,12 +110,12 @@ async function employeeFor(user, employeeId, session, writing = false) {
     // ordinary-employee permission boundary during a photo write.
     const filter = { _id: row.user, company: user.company, role: "employee" };
     const linked = session
-      ? await M.User.findOneAndUpdate(
+      ? await models.User.findOneAndUpdate(
           filter,
           { $inc: { __v: 1 } },
           { session, returnDocument: "after" },
         )
-      : await M.User.findOne(filter).select("_id");
+      : await models.User.findOne(filter).select("_id");
     if (!linked)
       throw new ApiError(
         403,
@@ -127,9 +124,8 @@ async function employeeFor(user, employeeId, session, writing = false) {
   }
   return row;
 }
-
 async function lockActor(user, session) {
-  const actor = await M.User.findOneAndUpdate(
+  const actor = await models.User.findOneAndUpdate(
     {
       _id: user._id,
       company: user.company,
@@ -142,24 +138,21 @@ async function lockActor(user, session) {
   );
   if (!actor) throw new ApiError(401, "Your session changed. Sign in again.");
 }
-
 async function savePhoto(user, employeeId, dataUrl) {
   // Authorize before doing potentially expensive image decoding.
   await employeeFor(user, employeeId, null, true);
   const photo = await normalizePhoto(dataUrl);
   try {
-    return await C.transaction(async (session) => {
+    return await context.transaction(async (session) => {
       await lockActor(user, session);
       const employee = await employeeFor(user, employeeId, session, true);
       const photoUpdatedAt = new Date();
-      await M.Employee.updateOne(
+      await models.Employee.updateOne(
         { _id: employee._id, company: user.company },
-        {
-          $set: { photo, photoUpdatedAt },
-        },
+        { $set: { photo, photoUpdatedAt } },
         { session, runValidators: true },
       );
-      await C.audit(
+      await context.audit(
         session,
         user,
         "employee_photo_updated",
@@ -176,31 +169,26 @@ async function savePhoto(user, employeeId, dataUrl) {
     photo.fill(0);
   }
 }
-
 async function readPhoto(user, employeeId) {
   const filter = {
     company: user.company,
-    $and: [{ _id: employeeId }, C.employeeScope(user)],
+    $and: [{ _id: employeeId }, context.employeeScope(user)],
   };
-  const row = await M.Employee.findOne(filter).select("+photo");
+  const row = await models.Employee.findOne(filter).select("+photo");
   if (!row || !row.photo?.length)
     throw new ApiError(404, "Employee photo not found.");
   return Buffer.from(row.photo);
 }
-
 async function deletePhoto(user, employeeId) {
-  return C.transaction(async (session) => {
+  return context.transaction(async (session) => {
     await lockActor(user, session);
     const employee = await employeeFor(user, employeeId, session, true);
-    await M.Employee.updateOne(
+    await models.Employee.updateOne(
       { _id: employee._id, company: user.company },
-      {
-        $unset: { photo: 1 },
-        $set: { photoUpdatedAt: null },
-      },
+      { $unset: { photo: 1 }, $set: { photoUpdatedAt: null } },
       { session },
     );
-    await C.audit(
+    await context.audit(
       session,
       user,
       "employee_photo_deleted",
@@ -211,7 +199,6 @@ async function deletePhoto(user, employeeId) {
     return { deleted: true, photoUpdatedAt: null };
   });
 }
-
 module.exports = {
   savePhoto,
   readPhoto,

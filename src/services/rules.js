@@ -13,18 +13,21 @@ function dates(start, end) {
     throw new ApiError(422, "Choose a range of at most three years.");
   const result = [];
   for (
-    let d = new Date(start);
-    d <= new Date(end);
-    d.setUTCDate(d.getUTCDate() + 1)
+    let date = new Date(start);
+    date <= new Date(end);
+    date.setUTCDate(date.getUTCDate() + 1)
   )
-    result.push(d.toISOString().slice(0, 10));
+    result.push(date.toISOString().slice(0, 10));
   return result;
 }
 function workingDays(start, end, company, holidays) {
-  const holidaySet = new Set(holidays.map((h) => h.date || h));
+  const holidaySet = new Set(
+    holidays.map((holiday) => holiday.date || holiday),
+  );
   return dates(start, end).filter(
-    (d) =>
-      !company.weekend.includes(new Date(d).getUTCDay()) && !holidaySet.has(d),
+    (date) =>
+      !company.weekend.includes(new Date(date).getUTCDay()) &&
+      !holidaySet.has(date),
   );
 }
 function attendanceStatus(checkIn, checkOut, rules) {
@@ -52,33 +55,25 @@ function attendanceStatus(checkIn, checkOut, rules) {
       422,
       "Check-out must follow check-in within the maximum shift duration.",
     );
-  return {
-    late,
-    hours,
-    status: !checkOut
-      ? "missing_checkout"
-      : hours < rules.halfDayHours
-        ? "half_day"
-        : late
-          ? "late"
-          : "present",
-  };
+  let status = "missing_checkout";
+  if (checkOut) {
+    if (hours < rules.halfDayHours) status = "half_day";
+    else if (late) status = "late";
+    else status = "present";
+  }
+  return { late, hours, status };
 }
 function monthlyTax(gross) {
   const annual = gross * 12;
-  const tax =
-    annual <= 600000
-      ? 0
-      : annual <= 1200000
-        ? (annual - 600000) * 0.05
-        : annual <= 2400000
-          ? 30000 + (annual - 1200000) * 0.15
-          : annual <= 3600000
-            ? 210000 + (annual - 2400000) * 0.25
-            : 510000 + (annual - 3600000) * 0.35;
+  let tax;
+  if (annual <= 600000) tax = 0;
+  else if (annual <= 1200000) tax = (annual - 600000) * 0.05;
+  else if (annual <= 2400000) tax = 30000 + (annual - 1200000) * 0.15;
+  else if (annual <= 3600000) tax = 210000 + (annual - 2400000) * 0.25;
+  else tax = 510000 + (annual - 3600000) * 0.35;
   return tax / 12;
 }
-const round = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+const round = (amount) => Math.round((amount + Number.EPSILON) * 100) / 100;
 function calculatePay(basic, working, eligible, absent, unpaid, halfDays) {
   if (working <= 0) throw new ApiError(422, "This month has no working days.");
   const gross = basic * 1.5;

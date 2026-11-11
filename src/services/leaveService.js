@@ -1,12 +1,12 @@
-const M = require("../models");
+const models = require("../models");
 const { requireEmployee } = require("./context");
 const { today } = require("./rules");
 async function balances(user, year = today().slice(0, 4), session) {
   const employee = requireEmployee(user);
-  const types = await M.LeaveType.find()
+  const types = await models.LeaveType.find()
     .session(session || null)
     .lean();
-  const leaves = await M.Leave.find({
+  const leaves = await models.Leave.find({
     employee,
     status: { $in: ["approved", "pending"] },
     start: { $lte: `${year}-12-31` },
@@ -14,20 +14,36 @@ async function balances(user, year = today().slice(0, 4), session) {
   })
     .session(session || null)
     .lean();
-  return types.map((t) => {
+  return types.map((leaveType) => {
     const used = leaves
       .filter(
-        (l) => String(l.type) === String(t._id) && l.status === "approved",
+        (leave) =>
+          String(leave.type) === String(leaveType._id) &&
+          leave.status === "approved",
       )
-      .reduce((n, l) => n + l.days.filter((d) => d.startsWith(year)).length, 0);
+      .reduce(
+        (totalDays, leave) =>
+          totalDays + leave.days.filter((date) => date.startsWith(year)).length,
+        0,
+      );
     const pending = leaves
-      .filter((l) => String(l.type) === String(t._id) && l.status === "pending")
-      .reduce((n, l) => n + l.days.filter((d) => d.startsWith(year)).length, 0);
+      .filter(
+        (leave) =>
+          String(leave.type) === String(leaveType._id) &&
+          leave.status === "pending",
+      )
+      .reduce(
+        (totalDays, leave) =>
+          totalDays + leave.days.filter((date) => date.startsWith(year)).length,
+        0,
+      );
     return {
-      ...t,
+      ...leaveType,
       used,
       pending,
-      remaining: t.unpaid ? null : Math.max(0, t.quota - used - pending),
+      remaining: leaveType.unpaid
+        ? null
+        : Math.max(0, leaveType.quota - used - pending),
     };
   });
 }

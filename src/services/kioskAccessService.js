@@ -1,6 +1,6 @@
 const crypto = require("node:crypto");
-const M = require("../models");
-const C = require("./context");
+const models = require("../models");
+const context = require("./context");
 const ApiError = require("../utils/ApiError");
 const { withCompany } = require("./companyContext");
 const COOKIE = "hcm_attendance_terminal";
@@ -43,7 +43,7 @@ async function adminActor(user, session) {
       403,
       "Only the company Admin can manage attendance terminals.",
     );
-  const actor = await M.User.findOneAndUpdate(
+  const actor = await models.User.findOneAndUpdate(
     {
       _id: user._id,
       company: user.company,
@@ -61,13 +61,13 @@ async function adminActor(user, session) {
     );
 }
 async function audit(session, user, action, entity, details) {
-  await C.audit(session, user, action, entity, null, details);
+  await context.audit(session, user, action, entity, null, details);
 }
 async function listDevices(user) {
   if (user?.role !== "admin")
     throw new ApiError(403, "Only Admin can list attendance terminals.");
   return (
-    await M.KioskDevice.find({ company: user.company })
+    await models.KioskDevice.find({ company: user.company })
       .sort({ createdAt: -1 })
       .lean()
   ).map(deviceView);
@@ -77,9 +77,9 @@ async function createDevice(user, label, { reusable = false } = {}) {
     expiresAt = new Date(Date.now() + PAIR_LIFETIME);
   const credential = reusable ? token() : null;
   const credentialExpiresAt = new Date(Date.now() + DEVICE_LIFETIME);
-  const row = await C.transaction(async (session) => {
+  const row = await context.transaction(async (session) => {
     await adminActor(user, session);
-    const company = await M.Company.findOne({ _id: user.company })
+    const company = await models.Company.findOne({ _id: user.company })
       .session(session)
       .lean();
     if (
@@ -91,7 +91,7 @@ async function createDevice(user, label, { reusable = false } = {}) {
         422,
         "Configure the company office latitude and longitude before pairing an attendance terminal.",
       );
-    const [device] = await M.KioskDevice.create(
+    const [device] = await models.KioskDevice.create(
       [
         {
           company: user.company,
@@ -132,9 +132,9 @@ async function createDevice(user, label, { reusable = false } = {}) {
     : { device: deviceView(row), pairingToken, expiresAt };
 }
 async function revokeDevice(user, id) {
-  await C.transaction(async (session) => {
+  await context.transaction(async (session) => {
     await adminActor(user, session);
-    const row = await M.KioskDevice.findOneAndUpdate(
+    const row = await models.KioskDevice.findOneAndUpdate(
       { _id: id, company: user.company },
       {
         state: "revoked",
@@ -145,7 +145,7 @@ async function revokeDevice(user, id) {
       { session, returnDocument: "after" },
     );
     if (!row) throw new ApiError(404, "Attendance terminal not found.");
-    await M.KioskChallenge.updateMany(
+    await models.KioskChallenge.updateMany(
       {
         company: user.company,
         device: row._id,
@@ -170,7 +170,7 @@ async function pairDevice(pairingToken, res) {
     now = new Date();
   const credential = token(),
     credentialExpiresAt = new Date(Date.now() + DEVICE_LIFETIME);
-  const device = await M.KioskDevice.findOneAndUpdate(
+  const device = await models.KioskDevice.findOneAndUpdate(
     { pairingTokenHash, state: "pending", pairingExpiresAt: { $gt: now } },
     {
       state: "paired",
@@ -187,7 +187,7 @@ async function pairDevice(pairingToken, res) {
       422,
       "This terminal connection code is invalid, expired or already used. Ask Admin for a new code.",
     );
-  const company = await M.Company.findOne({ _id: device.company })
+  const company = await models.Company.findOne({ _id: device.company })
     .select("name")
     .lean();
   if (!company) throw new ApiError(403, "This company is unavailable.");
@@ -222,7 +222,7 @@ async function deviceFromRequest(req, { required = true } = {}) {
   );
   let row;
   if (match)
-    row = await M.KioskDevice.findOne({
+    row = await models.KioskDevice.findOne({
       _id: match[1],
       tokenVersion: Number(match[2]),
       state: "paired",
@@ -237,7 +237,7 @@ async function deviceFromRequest(req, { required = true } = {}) {
       "Connect this terminal with a company Admin code before scanning.",
     );
   }
-  const company = await M.Company.findOne({ _id: row.company })
+  const company = await models.Company.findOne({ _id: row.company })
     .select("name")
     .lean();
   if (!company) {
@@ -297,7 +297,7 @@ function disconnectDevice(res) {
   return { paired: false };
 }
 async function lockDevice(device, session) {
-  const row = await M.KioskDevice.findOneAndUpdate(
+  const row = await models.KioskDevice.findOneAndUpdate(
     {
       _id: device._id,
       company: device.company,
@@ -319,8 +319,8 @@ async function unpairDevice(device, res) {
   if (device?.reusable) return disconnectDevice(res);
   if (device)
     await withCompany(device.company, () =>
-      C.transaction(async (session) => {
-        const row = await M.KioskDevice.findOneAndUpdate(
+      context.transaction(async (session) => {
+        const row = await models.KioskDevice.findOneAndUpdate(
           {
             _id: device._id,
             company: device.company,
@@ -336,7 +336,7 @@ async function unpairDevice(device, res) {
           { session, returnDocument: "after" },
         );
         if (row) {
-          await M.KioskChallenge.updateMany(
+          await models.KioskChallenge.updateMany(
             {
               company: device.company,
               device: device._id,
@@ -370,9 +370,9 @@ async function unpairDevice(device, res) {
 async function createEnrollmentGrant(user, employeeId) {
   const code = token(),
     expiresAt = new Date(Date.now() + GRANT_LIFETIME);
-  const employee = await C.transaction(async (session) => {
+  const employee = await context.transaction(async (session) => {
     await adminActor(user, session);
-    const person = await M.Employee.findOne({
+    const person = await models.Employee.findOne({
       _id: employeeId,
       company: user.company,
       status: { $ne: "exited" },
@@ -384,7 +384,7 @@ async function createEnrollmentGrant(user, employeeId) {
         422,
         "Upload a current profile photo for an active employee before issuing enrollment access.",
       );
-    const account = await M.User.findOne({
+    const account = await models.User.findOne({
       _id: person.user,
       company: user.company,
       employee: person._id,
@@ -392,7 +392,7 @@ async function createEnrollmentGrant(user, employeeId) {
     }).session(session);
     if (!account)
       throw new ApiError(422, "An active linked employee account is required.");
-    await M.KioskEnrollmentGrant.updateMany(
+    await models.KioskEnrollmentGrant.updateMany(
       {
         company: user.company,
         employee: person._id,
@@ -401,7 +401,7 @@ async function createEnrollmentGrant(user, employeeId) {
       { state: "revoked", failureCode: "replaced_by_admin" },
       { session },
     );
-    const [grant] = await M.KioskEnrollmentGrant.create(
+    const [grant] = await models.KioskEnrollmentGrant.create(
       [
         {
           company: user.company,
@@ -428,7 +428,7 @@ async function createEnrollmentGrant(user, employeeId) {
   return { code, expiresAt, employee };
 }
 async function assertFailureBudget(device) {
-  const failed = await M.KioskChallenge.countDocuments({
+  const failed = await models.KioskChallenge.countDocuments({
     company: device.company,
     device: device._id,
     state: "failed",
@@ -443,7 +443,7 @@ async function assertFailureBudget(device) {
 async function createChallenge(device, purpose) {
   await lockDevice(device);
   await assertFailureBudget(device);
-  const row = await M.KioskChallenge.create({
+  const row = await models.KioskChallenge.create({
     company: device.company,
     device: device._id,
     purpose,
@@ -457,7 +457,7 @@ async function createChallenge(device, purpose) {
   };
 }
 async function claimChallenge(device, id, purpose, session) {
-  const row = await M.KioskChallenge.findOneAndUpdate(
+  const row = await models.KioskChallenge.findOneAndUpdate(
     {
       _id: id,
       company: device.company,
@@ -478,7 +478,7 @@ async function claimChallenge(device, id, purpose, session) {
 }
 async function consumeChallenge(device, challenge, session) {
   await lockDevice(device, session);
-  const result = await M.KioskChallenge.updateOne(
+  const result = await models.KioskChallenge.updateOne(
     {
       _id: challenge._id || challenge,
       company: device.company,
@@ -496,7 +496,7 @@ async function consumeChallenge(device, challenge, session) {
     );
 }
 async function failChallenge(device, challenge, reason = "scan_rejected") {
-  await M.KioskChallenge.updateOne(
+  await models.KioskChallenge.updateOne(
     {
       _id: challenge._id || challenge,
       company: device.company,
@@ -507,7 +507,7 @@ async function failChallenge(device, challenge, reason = "scan_rejected") {
   );
 }
 async function claimEnrollmentGrant(device, code, session) {
-  const row = await M.KioskEnrollmentGrant.findOneAndUpdate(
+  const row = await models.KioskEnrollmentGrant.findOneAndUpdate(
     {
       company: device.company,
       codeHash: hash(code),
@@ -532,7 +532,7 @@ async function claimEnrollmentGrant(device, code, session) {
   return row;
 }
 async function consumeEnrollmentGrant(device, grant, session) {
-  const result = await M.KioskEnrollmentGrant.updateOne(
+  const result = await models.KioskEnrollmentGrant.updateOne(
     {
       _id: grant._id || grant,
       company: device.company,
@@ -550,14 +550,14 @@ async function consumeEnrollmentGrant(device, grant, session) {
     );
 }
 async function failEnrollmentGrant(device, grant, reason = "capture_rejected") {
-  const row = await M.KioskEnrollmentGrant.findOne({
+  const row = await models.KioskEnrollmentGrant.findOne({
     _id: grant._id || grant,
     company: device.company,
     device: device._id,
     state: "verifying",
   }).lean();
   if (!row) return;
-  await M.KioskEnrollmentGrant.updateOne(
+  await models.KioskEnrollmentGrant.updateOne(
     {
       _id: row._id,
       company: device.company,

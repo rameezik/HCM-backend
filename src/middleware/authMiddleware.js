@@ -1,5 +1,5 @@
 const jwt = require("jsonwebtoken");
-const M = require("../models");
+const models = require("../models");
 const ApiError = require("../utils/ApiError");
 const { withCompany } = require("../services/companyContext");
 async function auth(req, res, next) {
@@ -16,11 +16,14 @@ async function auth(req, res, next) {
     } catch {
       throw new ApiError(401, "Your session expired. Sign in again.");
     }
-    const user = await M.User.findById(payload.sub);
+    const user = await models.User.findById(payload.sub);
     if (!user || !user.active || user.tokenVersion !== payload.version)
       throw new ApiError(401, "Your session is no longer active.");
     if (!user.company) {
-      const companies = await M.Company.find().limit(2).select("_id").lean();
+      const companies = await models.Company.find()
+        .limit(2)
+        .select("_id")
+        .lean();
       if (companies.length !== 1)
         throw new ApiError(
           403,
@@ -46,10 +49,14 @@ async function auth(req, res, next) {
     next(error);
   }
 }
-const roles =
-  (...allowed) =>
-  (req, res, next) =>
-    allowed.includes(req.user.role)
-      ? next()
-      : next(new ApiError(403, "This action is not allowed for your role."));
+function roles(...allowedRoles) {
+  return (req, res, next) => {
+    if (!allowedRoles.includes(req.user.role)) {
+      return next(
+        new ApiError(403, "This action is not allowed for your role."),
+      );
+    }
+    next();
+  };
+}
 module.exports = { auth, roles };

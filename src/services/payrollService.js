@@ -1,4 +1,4 @@
-const M = require("../models");
+const models = require("../models");
 const { settings } = require("./context");
 const { workingDays, calculatePay, attendanceStatus } = require("./rules");
 async function generate(month, session) {
@@ -8,7 +8,7 @@ async function generate(month, session) {
     .slice(0, 10);
   const { company, holidays } = await settings(session);
   const allDays = workingDays(start, end, company, holidays);
-  const employees = await M.Employee.find({
+  const employees = await models.Employee.find({
     joinDate: { $lte: end },
     $or: [
       { exitDate: { $exists: false } },
@@ -20,18 +20,20 @@ async function generate(month, session) {
     .session(session)
     .lean();
   const slips = [];
-  for (const e of employees) {
+  for (const employee of employees) {
     const days = allDays.filter(
-      (d) => d >= e.joinDate && (!e.exitDate || d <= e.exitDate),
+      (date) =>
+        date >= employee.joinDate &&
+        (!employee.exitDate || date <= employee.exitDate),
     );
-    const attendance = await M.Attendance.find({
-      employee: e._id,
+    const attendance = await models.Attendance.find({
+      employee: employee._id,
       date: { $gte: start, $lte: end },
     })
       .session(session)
       .lean();
-    const leaves = await M.Leave.find({
-      employee: e._id,
+    const leaves = await models.Leave.find({
+      employee: employee._id,
       status: "approved",
       start: { $lte: end },
       end: { $gte: start },
@@ -42,8 +44,8 @@ async function generate(month, session) {
       unpaid = 0,
       halfDays = 0;
     for (const day of days) {
-      const row = attendance.find((r) => r.date === day);
-      const leave = leaves.find((l) => l.days.includes(day));
+      const row = attendance.find((record) => record.date === day);
+      const leave = leaves.find((leave) => leave.days.includes(day));
       if (row) {
         if (row.status === "half_day") halfDays++;
       } else if (leave) {
@@ -51,14 +53,14 @@ async function generate(month, session) {
       } else absent++;
     }
     slips.push({
-      employee: e._id,
-      user: e.user,
-      name: e.name,
-      code: e.code,
-      department: e.department,
-      designation: e.designation,
+      employee: employee._id,
+      user: employee.user,
+      name: employee.name,
+      code: employee.code,
+      department: employee.department,
+      designation: employee.designation,
       ...calculatePay(
-        e.basic,
+        employee.basic,
         allDays.length,
         days.length,
         absent,
